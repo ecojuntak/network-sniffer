@@ -16,11 +16,16 @@ jobs:
       - name: Install eBPF toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm curl linux-tools-common linux-tools-generic
+          sudo apt-get install -y clang llvm curl linux-tools-generic
+          # The /usr/bin/bpftool wrapper demands a per-kernel package absent on
+          # CI cloud kernels; use the real binary bundled with linux-tools-generic.
+          BPFTOOL="$(ls /usr/lib/linux-tools-*/bpftool | head -1)"
+          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
+          "$BPFTOOL" version
       - name: Resolve dependencies
         run: go mod tidy
       - name: Generate eBPF bindings
-        run: make generate
+        run: make generate BPFTOOL="$BPFTOOL"
       - name: Vet
         run: go vet ./...
       - name: Test (race + coverage)

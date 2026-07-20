@@ -44,8 +44,15 @@ fmt:
 	gofmt -l -w .
 
 ## vmlinux: dump kernel BTF into vmlinux.h (run on the target kernel/CI).
+# Use the standalone bpftool binary; the linux-tools-common /usr/bin/bpftool
+# wrapper needs a per-kernel package and fails on CI cloud kernels. Write via a
+# temp file so a failed dump never leaves a corrupt header behind.
 $(VMLINUX):
-	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $(VMLINUX)
+	@test -r /sys/kernel/btf/vmlinux || { \
+		echo "ERROR: /sys/kernel/btf/vmlinux not readable — kernel needs CONFIG_DEBUG_INFO_BTF"; \
+		exit 1; }
+	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $(VMLINUX).tmp
+	mv $(VMLINUX).tmp $(VMLINUX)
 
 ## headers: vendor the pinned libbpf CO-RE headers used by the eBPF program.
 .PHONY: headers
