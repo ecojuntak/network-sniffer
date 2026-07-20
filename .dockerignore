@@ -1,0 +1,12 @@
+.git
+.github
+/bin
+coverage.out
+coverage.html
+*.md
+deploy
+# eBPF source/headers/BTF are only needed by `make generate`, not `go build`
+# (the compiled internal/bpf/sniffer_bpfel.o is what the binary embeds).
+bpf/headers
+bpf/vmlinux.h
+bpf/sniffer.c
