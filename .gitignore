@@ -1,0 +1,16 @@
+# Build output
+/bin/
+coverage.out
+coverage.html
+
+# Generated eBPF artifacts (produced by `make generate`)
+internal/bpf/sniffer_bpfel.go
+internal/bpf/sniffer_bpfeb.go
+internal/bpf/sniffer_bpfel.o
+internal/bpf/sniffer_bpfeb.o
+
+# Generated kernel BTF (produced by `make vmlinux` on the target kernel)
+bpf/vmlinux.h
+
+# Vendored libbpf headers (fetched by `make headers`)
+bpf/headers/

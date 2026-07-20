@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: network-sniffer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: network-sniffer
+  namespace: network-sniffer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: network-sniffer
+rules:
+  # Read-only cluster-wide watch to map pod IPs to their owning workload.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: network-sniffer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: network-sniffer
+subjects:
+  - kind: ServiceAccount
+    name: network-sniffer
+    namespace: network-sniffer
