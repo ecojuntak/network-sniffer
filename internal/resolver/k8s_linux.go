@@ -81,6 +81,14 @@ func (c *Controller) onPod(obj any) {
 	if !ok {
 		return
 	}
+	// Host-network pods (e.g. the sniffer DaemonSet, kube-proxy, CNI agents)
+	// report the node IP as their pod IP. Indexing that would map the node's
+	// host IP — and therefore every connection to it — to a single workload,
+	// producing phantom edges like dest=network-sniffer for traffic the pod
+	// never received. Skip them; such node-IP traffic resolves as external.
+	if pod.Spec.HostNetwork {
+		return
+	}
 	ips := podIPs(pod)
 	if len(ips) == 0 {
 		return // not scheduled / no IP yet

@@ -140,6 +140,30 @@ func TestControllerPodNoIP(t *testing.T) {
 	}
 }
 
+// Host-network pods report the node IP as their pod IP; indexing them would
+// attribute all node-host traffic to a single workload (phantom dest edges).
+// They must be skipped.
+func TestControllerSkipsHostNetworkPod(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "network-sniffer-abcde", Namespace: "canary-prober",
+			OwnerReferences: []metav1.OwnerReference{ctrlRef("DaemonSet", "network-sniffer")},
+		},
+		Spec:   corev1.PodSpec{HostNetwork: true},
+		Status: corev1.PodStatus{PodIP: "10.20.30.40"}, // == node IP for host-network pods
+	}
+	seed(t, c, pod)
+	c.onPod(pod)
+
+	if c.cache.Len() != 0 {
+		t.Fatalf("cache Len = %d, want 0 for host-network pod", c.cache.Len())
+	}
+	if _, ok := c.cache.LookupIP(netip.MustParseAddr("10.20.30.40")); ok {
+		t.Fatal("host-network pod IP (node IP) must not be cached")
+	}
+}
+
 func TestControllerDualStackIPs(t *testing.T) {
 	c := NewController(fake.NewSimpleClientset())
 	pod := &corev1.Pod{
