@@ -71,6 +71,27 @@ func (e ConnectionEvent) IsAWSReserved() bool {
 	return awsReservedPrefix.Contains(e.SrcIP) || awsReservedPrefix.Contains(e.DstIP)
 }
 
+// EphemeralPortMin is the lowest port in the Linux default ephemeral range
+// (net.ipv4.ip_local_port_range = 32768-60999). Client sockets draw their
+// source port from this range; listening services almost always sit below it.
+const EphemeralPortMin uint16 = 32768
+
+// HasEphemeralDestPort reports whether the destination port is in the
+// ephemeral range. The `inet_sock_set_state` tracepoint fires for BOTH ends of
+// every connection, so a single call A->B:svc yields two events: the client
+// side (dst = B's service port) and the server side (dst = A's ephemeral port).
+// The client side is the canonical caller->callee edge and is always captured
+// (both sockets share a node for same-node pairs; cluster-wide the caller's own
+// node sees it). The server-side record is a reversed duplicate identifiable by
+// its ephemeral destination port, so the pipeline drops it — de-duplicating the
+// two-sided capture without correlating socket pairs.
+//
+// Limitation: a service that listens on an ephemeral-range port is dropped too.
+// Rare in practice; revisit with a configurable threshold if it bites.
+func (e ConnectionEvent) HasEphemeralDestPort() bool {
+	return e.DstPort >= EphemeralPortMin
+}
+
 // Workload identifies a kubernetes workload (the top-level owner of a pod,
 // e.g. a Deployment or Argo Rollout), or an out-of-cluster peer.
 type Workload struct {

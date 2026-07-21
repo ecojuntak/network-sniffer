@@ -95,3 +95,29 @@ func TestConnectionEventIsAWSReserved(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectionEventHasEphemeralDestPort(t *testing.T) {
+	tests := []struct {
+		name string
+		port uint16
+		want bool
+	}{
+		{"http service", 80, false},
+		{"https service", 443, false},
+		{"postgres", 5432, false},
+		{"high service port", 8080, false},
+		{"nodeport top", 32767, false},
+		{"ephemeral min", 32768, true},
+		{"ephemeral mid", 45000, true},
+		{"ephemeral max", 60999, true},
+		{"zero port", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := ConnectionEvent{DstPort: tt.port}
+			if got := ev.HasEphemeralDestPort(); got != tt.want {
+				t.Fatalf("HasEphemeralDestPort() DstPort=%d = %v, want %v", tt.port, got, tt.want)
+			}
+		})
+	}
+}
