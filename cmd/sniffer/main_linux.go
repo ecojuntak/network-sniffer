@@ -95,6 +95,12 @@ func run(logger *slog.Logger) error {
 			continue
 		}
 
+		// Loopback is intra-pod (or host-local) traffic with no cross-workload
+		// dependency and no resolvable identity; drop it.
+		if ev.IsLoopback() {
+			continue
+		}
+
 		sc := enrich.Enrich(ev, ctrl.Cache())
 		if deduper.Allow(sc, time.Now()) {
 			out.Log(sc)

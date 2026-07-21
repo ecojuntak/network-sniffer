@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"net/netip"
+	"testing"
+)
 
 func TestProtocolString(t *testing.T) {
 	tests := []struct {
@@ -32,5 +35,33 @@ func TestWorkloadIsExternal(t *testing.T) {
 	}
 	if (Workload{}).IsExternal() {
 		t.Fatal("zero workload should not be external (empty kind != external)")
+	}
+}
+
+func TestConnectionEventIsLoopback(t *testing.T) {
+	mk := func(src, dst string) ConnectionEvent {
+		return ConnectionEvent{
+			SrcIP: netip.MustParseAddr(src),
+			DstIP: netip.MustParseAddr(dst),
+		}
+	}
+	tests := []struct {
+		name string
+		ev   ConnectionEvent
+		want bool
+	}{
+		{"src loopback v4", mk("127.0.0.1", "10.0.0.5"), true},
+		{"dst loopback v4", mk("10.0.0.5", "127.0.0.1"), true},
+		{"both loopback v4", mk("127.0.0.1", "127.0.0.1"), true},
+		{"loopback high v4", mk("127.5.6.7", "10.0.0.5"), true},
+		{"loopback v6", mk("10.0.0.5", "::1"), true},
+		{"no loopback", mk("10.0.0.5", "10.0.0.6"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ev.IsLoopback(); got != tt.want {
+				t.Fatalf("IsLoopback() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

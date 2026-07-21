@@ -47,6 +47,15 @@ type ConnectionEvent struct {
 	Comm string
 }
 
+// IsLoopback reports whether either endpoint is a loopback address
+// (127.0.0.0/8 or ::1). Loopback traffic is intra-pod (or host-local) and
+// carries no cross-workload dependency, so the pipeline drops it: the pod-IP
+// cache cannot attribute it (loopback is never a pod IP and exists in every
+// network namespace).
+func (e ConnectionEvent) IsLoopback() bool {
+	return e.SrcIP.IsLoopback() || e.DstIP.IsLoopback()
+}
+
 // Workload identifies a kubernetes workload (the top-level owner of a pod,
 // e.g. a Deployment or Argo Rollout), or an out-of-cluster peer.
 type Workload struct {
