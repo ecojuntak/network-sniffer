@@ -33,8 +33,36 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out
 
-  docker:
+  release:
     needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      # Consumed by the docker job to tag the image with the released version.
+      version: ${{ steps.semantic.outputs.new_release_version }}
+      published: ${{ steps.semantic.outputs.new_release_published }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # semantic-release needs full history to compute the next version.
+          fetch-depth: 0
+      - name: Semantic Release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          extra_plugins: |
+            @semantic-release/commit-analyzer
+            @semantic-release/release-notes-generator
+            @semantic-release/github
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    needs: [test, release]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -89,6 +117,9 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,format=long
+            # Version tags (e.g. 1.2.3 + 1.2 + v1.2.3) only when a release was cut.
+            type=raw,value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.published == 'true' }}
+            type=raw,value=v${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.published == 'true' }}
       - name: Build and push (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
