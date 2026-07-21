@@ -23,7 +23,7 @@ spec:
       # Run on every node, including control-plane.
       containers:
         - name: sniffer
-          image: ecojuntak/network-sniffer:latest
+          image: ecojuntak/network-sniffer:v1.0.0
           imagePullPolicy: IfNotPresent
           securityContext:
             # eBPF tracepoint + ring buffer on kernels >= 5.8 need BPF+PERFMON;

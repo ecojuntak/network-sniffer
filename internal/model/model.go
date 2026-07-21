@@ -56,6 +56,21 @@ func (e ConnectionEvent) IsLoopback() bool {
 	return e.SrcIP.IsLoopback() || e.DstIP.IsLoopback()
 }
 
+// awsReservedPrefix is the fd00:ec2::/32 ULA range AWS reserves for EC2
+// internal service endpoints (Instance Metadata Service fd00:ec2::254,
+// VPC DNS fd00:ec2::253, Amazon Time Sync fd00:ec2::123, ...). These are
+// infrastructure endpoints reachable from every instance, not cluster
+// workloads, so they carry no cross-workload dependency worth logging.
+var awsReservedPrefix = netip.MustParsePrefix("fd00:ec2::/32")
+
+// IsAWSReserved reports whether either endpoint is in the AWS-reserved
+// fd00:ec2::/32 range. Such traffic is host-to-infrastructure (metadata,
+// DNS, NTP) and is dropped by the pipeline for the same reason as loopback:
+// it has no resolvable workload identity and no cross-workload meaning.
+func (e ConnectionEvent) IsAWSReserved() bool {
+	return awsReservedPrefix.Contains(e.SrcIP) || awsReservedPrefix.Contains(e.DstIP)
+}
+
 // Workload identifies a kubernetes workload (the top-level owner of a pod,
 // e.g. a Deployment or Argo Rollout), or an out-of-cluster peer.
 type Workload struct {

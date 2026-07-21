@@ -96,8 +96,9 @@ func run(logger *slog.Logger) error {
 		}
 
 		// Loopback is intra-pod (or host-local) traffic with no cross-workload
-		// dependency and no resolvable identity; drop it.
-		if ev.IsLoopback() {
+		// dependency and no resolvable identity; drop it. Same for AWS-reserved
+		// fd00:ec2::/32 endpoints (metadata/DNS/NTP): infrastructure, not workloads.
+		if ev.IsLoopback() || ev.IsAWSReserved() {
 			continue
 		}
 

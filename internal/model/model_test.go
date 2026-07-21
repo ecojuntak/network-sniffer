@@ -65,3 +65,33 @@ func TestConnectionEventIsLoopback(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectionEventIsAWSReserved(t *testing.T) {
+	mk := func(src, dst string) ConnectionEvent {
+		return ConnectionEvent{
+			SrcIP: netip.MustParseAddr(src),
+			DstIP: netip.MustParseAddr(dst),
+		}
+	}
+	tests := []struct {
+		name string
+		ev   ConnectionEvent
+		want bool
+	}{
+		{"src fd00:ec2::23", mk("fd00:ec2::23", "10.0.0.5"), true},
+		{"dst imds", mk("10.0.0.5", "fd00:ec2::254"), true},
+		{"dst vpc dns", mk("10.0.0.5", "fd00:ec2::253"), true},
+		{"dst time sync", mk("10.0.0.5", "fd00:ec2::123"), true},
+		{"both reserved", mk("fd00:ec2::1", "fd00:ec2::2"), true},
+		{"other ula not reserved", mk("fd00:beef::1", "10.0.0.5"), false},
+		{"pod v6 not reserved", mk("fd12:3456::1", "10.0.0.5"), false},
+		{"v4 not reserved", mk("10.0.0.5", "10.0.0.6"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ev.IsAWSReserved(); got != tt.want {
+				t.Fatalf("IsAWSReserved() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
