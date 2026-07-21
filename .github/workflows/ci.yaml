@@ -41,7 +41,8 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/${{ github.repository }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}
+      DOCKERHUB_IMAGE: docker.io/ecojuntak/network-sniffer
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -72,11 +73,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
+          # One build, pushed to both registries under the same tags.
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=latest
             type=sha,format=long

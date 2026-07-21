@@ -17,9 +17,9 @@ spec:
       serviceAccountName: network-sniffer
       # See the node's connections directly and share the host PID namespace so
       # process (comm/pid) context is meaningful.
-      hostNetwork: true
-      hostPID: true
-      dnsPolicy: ClusterFirstWithHostNet
+      # hostNetwork: true
+      # hostPID: true
+      # dnsPolicy: ClusterFirstWithHostNet
       # Run on every node, including control-plane.
       tolerations:
         - operator: Exists
@@ -27,30 +27,29 @@ spec:
         - name: sniffer
           image: ghcr.io/ecojuntak/network-sniffer:latest
           imagePullPolicy: IfNotPresent
-          securityContext:
-            # eBPF tracepoint + ring buffer on kernels >= 5.8 need BPF+PERFMON;
-            # SYS_RESOURCE covers the memlock rlimit. Fall back to
-            # `privileged: true` on older kernels that lack CAP_BPF.
-            privileged: false
-            readOnlyRootFilesystem: true
-            runAsUser: 0
-            capabilities:
-              drop: ["ALL"]
-              add: ["BPF", "PERFMON", "SYS_RESOURCE"]
+          # securityContext:
+          #   # eBPF tracepoint + ring buffer on kernels >= 5.8 need BPF+PERFMON;
+          #   # SYS_RESOURCE covers the memlock rlimit. Fall back to
+          #   # `privileged: true` on older kernels that lack CAP_BPF.
+          #   privileged: false
+          #   readOnlyRootFilesystem: true
+          #   runAsUser: 0
+          #   capabilities:
+          #     drop: ["ALL"]
+          #     add: ["BPF", "PERFMON", "SYS_RESOURCE"]
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
             limits:
               memory: 256Mi
-          volumeMounts:
-            # CO-RE reads kernel BTF at runtime.
-            - name: btf
-              mountPath: /sys/kernel/btf
-              readOnly: true
-      volumes:
-        - name: btf
-          hostPath:
-            path: /sys/kernel/btf
-            type: Directory
-      priorityClassName: system-node-critical
+      #     volumeMounts:
+      #       # CO-RE reads kernel BTF at runtime.
+      #       - name: btf
+      #         mountPath: /sys/kernel/btf
+      #         readOnly: true
+      # volumes:
+      #   - name: btf
+      #     hostPath:
+      #       path: /sys/kernel/btf
+      #       type: Directory
