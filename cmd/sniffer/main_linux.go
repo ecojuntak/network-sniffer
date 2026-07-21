@@ -97,13 +97,15 @@ func run(logger *slog.Logger) error {
 
 		// Loopback is intra-pod (or host-local) traffic with no cross-workload
 		// dependency and no resolvable identity; drop it. Same for AWS-reserved
-		// fd00:ec2::/32 endpoints (metadata/DNS/NTP): infrastructure, not workloads.
+		// fd00:ec2::/32 endpoints (metadata/DNS/NTP) and link-local addresses
+		// (169.254.0.0/16 IMDS incl. 169.254.169.254, fe80::/10): infrastructure,
+		// not workloads.
 		//
 		// HasEphemeralDestPort drops the server-side half of the tracepoint's
 		// two-sided capture: that record has the client's ephemeral port as its
 		// destination and is a reversed duplicate of the canonical caller->callee
 		// edge (which is captured from the client side). See model.go.
-		if ev.IsLoopback() || ev.IsAWSReserved() || ev.HasEphemeralDestPort() {
+		if ev.IsLoopback() || ev.IsAWSReserved() || ev.IsLinkLocal() || ev.HasEphemeralDestPort() {
 			continue
 		}
 

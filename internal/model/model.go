@@ -71,6 +71,16 @@ func (e ConnectionEvent) IsAWSReserved() bool {
 	return awsReservedPrefix.Contains(e.SrcIP) || awsReservedPrefix.Contains(e.DstIP)
 }
 
+// IsLinkLocal reports whether either endpoint is a link-local unicast address
+// (IPv4 169.254.0.0/16 or IPv6 fe80::/10). This covers the cloud Instance
+// Metadata Service (IMDS) at 169.254.169.254 — the IPv4 twin of the
+// fd00:ec2:: endpoints — plus other link-local infrastructure. Such peers are
+// node-local infrastructure, not cluster workloads, so the pipeline drops them
+// for the same reason as loopback and the AWS-reserved range.
+func (e ConnectionEvent) IsLinkLocal() bool {
+	return e.SrcIP.IsLinkLocalUnicast() || e.DstIP.IsLinkLocalUnicast()
+}
+
 // EphemeralPortMin is the lowest port in the Linux default ephemeral range
 // (net.ipv4.ip_local_port_range = 32768-60999). Client sockets draw their
 // source port from this range; listening services almost always sit below it.

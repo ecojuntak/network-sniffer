@@ -96,6 +96,33 @@ func TestConnectionEventIsAWSReserved(t *testing.T) {
 	}
 }
 
+func TestConnectionEventIsLinkLocal(t *testing.T) {
+	mk := func(src, dst string) ConnectionEvent {
+		return ConnectionEvent{
+			SrcIP: netip.MustParseAddr(src),
+			DstIP: netip.MustParseAddr(dst),
+		}
+	}
+	tests := []struct {
+		name string
+		ev   ConnectionEvent
+		want bool
+	}{
+		{"dst imds", mk("10.0.0.5", "169.254.169.254"), true},
+		{"src link-local v4", mk("169.254.1.2", "10.0.0.5"), true},
+		{"dst link-local v6", mk("10.0.0.5", "fe80::1"), true},
+		{"cgnat not link-local", mk("100.90.100.163", "10.0.0.5"), false},
+		{"normal v4", mk("10.0.0.5", "10.0.0.6"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ev.IsLinkLocal(); got != tt.want {
+				t.Fatalf("IsLinkLocal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConnectionEventHasEphemeralDestPort(t *testing.T) {
 	tests := []struct {
 		name string
