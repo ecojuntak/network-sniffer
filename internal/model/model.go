@@ -56,6 +56,18 @@ func (e ConnectionEvent) IsLoopback() bool {
 	return e.SrcIP.IsLoopback() || e.DstIP.IsLoopback()
 }
 
+// IsSelfEdge reports whether both endpoints are the same address. Such traffic
+// is a workload talking to itself over its own IP (e.g. a host-network pod like
+// node-exporter scraped by a host-network prometheus on the same node: both
+// ends carry the node IP). It carries no cross-workload dependency, so the
+// pipeline drops it for the same reason as loopback. This filter is address-,
+// not range-based on purpose: on clusters whose VPC CIDR is itself CGNAT
+// (100.64.0.0/10), pod IPs and node IPs share that range, so a range filter
+// would drop legitimate pod-to-pod edges — only src == dst is safe to drop.
+func (e ConnectionEvent) IsSelfEdge() bool {
+	return e.SrcIP.Unmap() == e.DstIP.Unmap()
+}
+
 // awsReservedPrefix is the fd00:ec2::/32 ULA range AWS reserves for EC2
 // internal service endpoints (Instance Metadata Service fd00:ec2::254,
 // VPC DNS fd00:ec2::253, Amazon Time Sync fd00:ec2::123, ...). These are

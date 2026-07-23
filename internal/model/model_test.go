@@ -148,3 +148,31 @@ func TestConnectionEventHasEphemeralDestPort(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectionEventIsSelfEdge(t *testing.T) {
+	mk := func(src, dst string) ConnectionEvent {
+		return ConnectionEvent{
+			SrcIP: netip.MustParseAddr(src),
+			DstIP: netip.MustParseAddr(dst),
+		}
+	}
+	tests := []struct {
+		name string
+		ev   ConnectionEvent
+		want bool
+	}{
+		{"cgnat self v4", mk("100.90.106.4", "100.90.106.4"), true},
+		{"normal self v4", mk("10.0.0.5", "10.0.0.5"), true},
+		{"self v6", mk("2001:db8::1", "2001:db8::1"), true},
+		{"distinct v4", mk("100.90.106.4", "100.90.106.5"), false},
+		{"distinct v6", mk("2001:db8::1", "2001:db8::2"), false},
+		{"v4 mapped equals v6", mk("::ffff:10.0.0.5", "10.0.0.5"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ev.IsSelfEdge(); got != tt.want {
+				t.Fatalf("IsSelfEdge() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
