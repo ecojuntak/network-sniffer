@@ -128,6 +128,14 @@ type Workload struct {
 // (traffic leaving/entering the cluster).
 const KindExternal = "external"
 
+// KindNode marks a peer resolved to a cluster Node by its InternalIP rather
+// than to a pod-owned workload. Host-network processes (node-exporter,
+// kube-proxy, CNI agents, the sniffer itself) and node-level daemons source
+// traffic from the node IP, which no pod owns; this gives them the node's name
+// instead of a bare IP. Multiple host-network pods share one node IP, so this
+// is a node-level identity, not a per-pod one.
+const KindNode = "node"
+
 // IsExternal reports whether the workload is an out-of-cluster peer.
 func (w Workload) IsExternal() bool { return w.Kind == KindExternal }
 

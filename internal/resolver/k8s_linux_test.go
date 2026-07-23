@@ -33,6 +33,8 @@ func seed(t *testing.T, c *Controller, objs ...any) {
 			err = podIdx.Add(o)
 		case *appsv1.ReplicaSet:
 			err = rsIdx.Add(o)
+		case *corev1.Node:
+			err = c.factory.Core().V1().Nodes().Informer().GetIndexer().Add(o)
 		default:
 			t.Fatalf("unsupported seed object %T", o)
 		}
@@ -161,6 +163,112 @@ func TestControllerSkipsHostNetworkPod(t *testing.T) {
 	}
 	if _, ok := c.cache.LookupIP(netip.MustParseAddr("10.20.30.40")); ok {
 		t.Fatal("host-network pod IP (node IP) must not be cached")
+	}
+}
+
+// A node's InternalIP resolves to a Node-kind workload named after the node.
+// This gives host-network source traffic (node-exporter, kube-proxy, the
+// sniffer itself) a stable identity instead of a bare IP.
+func TestControllerResolvesNodeInternalIP(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "ip-100-90-106-4.eu-central-1.compute.internal"},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeInternalIP, Address: "100.90.106.4"},
+		}},
+	}
+	seed(t, c, node)
+	c.onNode(node)
+
+	got, ok := c.cache.LookupIP(netip.MustParseAddr("100.90.106.4"))
+	if !ok {
+		t.Fatal("node InternalIP not resolved into cache")
+	}
+	want := model.Workload{Name: "ip-100-90-106-4.eu-central-1.compute.internal", Kind: model.KindNode}
+	if got != want {
+		t.Fatalf("resolved workload = %+v, want %+v", got, want)
+	}
+}
+
+// External and DNS node addresses must not be indexed; only InternalIP is a
+// valid in-cluster source address.
+func TestControllerNodeIgnoresNonInternalIP(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeExternalIP, Address: "3.4.5.6"},
+			{Type: corev1.NodeInternalDNS, Address: "node-a.internal"},
+			{Type: corev1.NodeHostName, Address: "node-a"},
+		}},
+	}
+	seed(t, c, node)
+	c.onNode(node)
+
+	if c.cache.Len() != 0 {
+		t.Fatalf("cache Len = %d, want 0 (no InternalIP present)", c.cache.Len())
+	}
+	if _, ok := c.cache.LookupIP(netip.MustParseAddr("3.4.5.6")); ok {
+		t.Fatal("node ExternalIP must not be cached")
+	}
+}
+
+func TestControllerNodeDualStackIPs(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-ds"},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeInternalIP, Address: "100.90.106.4"},
+			{Type: corev1.NodeInternalIP, Address: "fd00::abcd"},
+		}},
+	}
+	seed(t, c, node)
+	c.onNode(node)
+
+	if _, ok := c.cache.LookupIP(netip.MustParseAddr("100.90.106.4")); !ok {
+		t.Error("v4 node IP not cached")
+	}
+	if _, ok := c.cache.LookupIP(netip.MustParseAddr("fd00::abcd")); !ok {
+		t.Error("v6 node IP not cached")
+	}
+}
+
+func TestControllerNodeDelete(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-x"},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeInternalIP, Address: "100.90.106.4"},
+		}},
+	}
+	seed(t, c, node)
+	c.onNode(node)
+	if c.cache.Len() != 1 {
+		t.Fatalf("cache Len after add = %d, want 1", c.cache.Len())
+	}
+
+	c.onNodeDelete(node)
+	if _, ok := c.cache.LookupIP(netip.MustParseAddr("100.90.106.4")); ok {
+		t.Fatal("node IP still cached after delete")
+	}
+}
+
+// onNodeDelete must handle the tombstone wrapper delivered on missed deletes.
+func TestControllerNodeDeleteTombstone(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-t"},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeInternalIP, Address: "100.90.106.5"},
+		}},
+	}
+	seed(t, c, node)
+	c.onNode(node)
+
+	tomb := clientcache.DeletedFinalStateUnknown{Key: "node-t", Obj: node}
+	c.onNodeDelete(tomb)
+	if _, ok := c.cache.LookupIP(netip.MustParseAddr("100.90.106.5")); ok {
+		t.Fatal("node IP still cached after tombstone delete")
 	}
 }
 

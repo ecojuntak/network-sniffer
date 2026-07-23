@@ -15,15 +15,19 @@ import (
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/ecojuntak/network-sniffer/internal/model"
 )
 
 // resyncPeriod is how often informers re-list to self-heal missed events.
 const resyncPeriod = 10 * time.Minute
 
-// Controller watches cluster pods and keeps a Cache of podIP -> top-level
+// Controller watches cluster pods and nodes and keeps a Cache of IP ->
 // workload. It watches pods cluster-wide (not only the local node) because a
 // connection's destination pod frequently lives on another node, and the
-// dependency map needs both endpoints resolved.
+// dependency map needs both endpoints resolved. Node InternalIPs are indexed
+// to a Node identity so host-network and node-level traffic resolves to the
+// node name instead of a bare IP.
 type Controller struct {
 	cache   *Cache
 	factory informers.SharedInformerFactory
@@ -53,6 +57,7 @@ func (c *Controller) Cache() *Cache { return c.cache }
 // error if the caches fail to sync.
 func (c *Controller) Run(ctx context.Context) error {
 	podInformer := c.factory.Core().V1().Pods().Informer()
+	nodeInformer := c.factory.Core().V1().Nodes().Informer()
 	// Realise the ReplicaSet informer so its lister is populated.
 	_ = c.factory.Apps().V1().ReplicaSets().Informer()
 
@@ -62,6 +67,14 @@ func (c *Controller) Run(ctx context.Context) error {
 		DeleteFunc: c.onPodDelete,
 	}); err != nil {
 		return fmt.Errorf("add pod event handler: %w", err)
+	}
+
+	if _, err := nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { c.onNode(obj) },
+		UpdateFunc: func(_, obj any) { c.onNode(obj) },
+		DeleteFunc: c.onNodeDelete,
+	}); err != nil {
+		return fmt.Errorf("add node event handler: %w", err)
 	}
 
 	c.factory.Start(ctx.Done())
@@ -116,6 +129,57 @@ func (c *Controller) onPodDelete(obj any) {
 	for _, ip := range podIPs(pod) {
 		c.cache.Delete(ip)
 	}
+}
+
+// onNode indexes a node's InternalIPs to a Node-kind workload. Host-network
+// pods report the node IP as their pod IP and are skipped by onPod, so without
+// this their source traffic resolves as a bare external IP. A node IP never
+// collides with a pod IP (distinct VPC addresses, even on CGNAT clusters where
+// both ranges are 100.64.0.0/10), so the two indexes share the cache safely.
+func (c *Controller) onNode(obj any) {
+	node, ok := obj.(*corev1.Node)
+	if !ok {
+		return
+	}
+	wl := model.Workload{Name: node.Name, Kind: model.KindNode}
+	for _, ip := range nodeInternalIPs(node) {
+		c.cache.Upsert(ip, wl)
+	}
+}
+
+// onNodeDelete removes a node's InternalIPs from the cache.
+func (c *Controller) onNodeDelete(obj any) {
+	node, ok := obj.(*corev1.Node)
+	if !ok {
+		// Handle the tombstone wrapper delivered on missed deletes.
+		tomb, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		node, ok = tomb.Obj.(*corev1.Node)
+		if !ok {
+			return
+		}
+	}
+	for _, ip := range nodeInternalIPs(node) {
+		c.cache.Delete(ip)
+	}
+}
+
+// nodeInternalIPs extracts the parseable NodeInternalIP addresses. Only
+// InternalIP is indexed: ExternalIP is a public address in-cluster traffic
+// never sources from, and DNS/HostName entries are not addresses.
+func nodeInternalIPs(node *corev1.Node) []netip.Addr {
+	var out []netip.Addr
+	for _, addr := range node.Status.Addresses {
+		if addr.Type != corev1.NodeInternalIP {
+			continue
+		}
+		if a, err := netip.ParseAddr(addr.Address); err == nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // podIPs extracts the parseable pod IPs, preferring status.podIPs and falling
