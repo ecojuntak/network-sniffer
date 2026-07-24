@@ -5,6 +5,16 @@ metadata:
   namespace: canary-prober
 data:
   config.yaml: |
+    # Istio ServiceEntry resolution: maps ServiceEntry VIPs (including istiod's
+    # auto-allocated 240.240.0.0/16 addresses) to their external host name, so
+    # external dependencies (e.g. RDS via a ServiceEntry) show a name instead
+    # of a bare IP. Disabled by default; enable only on Istio clusters (needs
+    # the serviceentries RBAC in rbac.yaml). Requires istiod to expose the
+    # allocated IPs in the ServiceEntry spec.addresses or status.addresses.
+    istio:
+      enabled: false
+      # apiVersion: v1beta1   # override the ServiceEntry API version if needed
+
     # Workloads to exclude from the dependency map at emit time.
     # Format: "<namespace>/<workload>", each segment a glob:
     #   "*"          matches a whole segment (including an empty one)

@@ -128,6 +128,12 @@ type Workload struct {
 // (traffic leaving/entering the cluster).
 const KindExternal = "external"
 
+// KindServiceEntry marks a peer resolved to an Istio ServiceEntry by one of its
+// VIPs (a user-specified spec address or an auto-allocated 240.240.0.0/16
+// address). The workload Name is the ServiceEntry host (e.g. an RDS endpoint),
+// giving external dependencies a stable name instead of a bare IP.
+const KindServiceEntry = "ServiceEntry"
+
 // KindNode marks a peer resolved to a cluster Node by its InternalIP rather
 // than to a pod-owned workload. Host-network processes (node-exporter,
 // kube-proxy, CNI agents, the sniffer itself) and node-level daemons source

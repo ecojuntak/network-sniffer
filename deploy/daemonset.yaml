@@ -23,7 +23,7 @@ spec:
       # Run on every node, including control-plane.
       containers:
         - name: sniffer
-          image: ecojuntak/network-sniffer:v1.3.0
+          image: ecojuntak/network-sniffer:v1.5.0
           imagePullPolicy: IfNotPresent
           # Ignore-list config, mounted from the network-sniffer ConfigMap.
           args:

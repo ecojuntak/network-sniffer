@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -81,6 +82,24 @@ func run(logger *slog.Logger, configPath string) error {
 			stop()
 		}
 	}()
+
+	// Optional Istio ServiceEntry resolver: maps ServiceEntry VIPs (incl. the
+	// auto-allocated 240.240.0.0/16 addresses) to their external host. Off
+	// unless enabled in config; a failure here (missing CRD/RBAC) degrades
+	// ServiceEntry dests back to their IP rather than stopping the sniffer.
+	if conf.Istio.Enabled {
+		dc, err := dynamic.NewForConfig(cfg)
+		if err != nil {
+			return err
+		}
+		istio := resolver.NewIstioController(dc, ctrl.Cache(), conf.Istio.APIVersion)
+		go func() {
+			if err := istio.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("istio resolver stopped (ServiceEntry dests will show as IPs)", slog.Any("err", err))
+			}
+		}()
+		logger.Info("istio serviceentry resolution enabled", slog.String("apiVersion", conf.Istio.APIVersion))
+	}
 
 	// eBPF data source.
 	loader, err := bpf.New()

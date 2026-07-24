@@ -38,6 +38,38 @@ ignore:
 	}
 }
 
+func TestLoadIstioToggle(t *testing.T) {
+	p := writeConfig(t, `
+istio:
+  enabled: true
+  apiVersion: v1
+ignore:
+  - "kube-system/*"
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Istio.Enabled {
+		t.Fatal("Istio.Enabled = false, want true")
+	}
+	if cfg.Istio.APIVersion != "v1" {
+		t.Fatalf("Istio.APIVersion = %q, want v1", cfg.Istio.APIVersion)
+	}
+}
+
+// Istio defaults to disabled when the section is absent.
+func TestLoadIstioDefaultDisabled(t *testing.T) {
+	p := writeConfig(t, "ignore: []\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Istio.Enabled {
+		t.Fatal("Istio.Enabled = true, want false by default")
+	}
+}
+
 // An empty path yields an empty config, not an error: the ignore list is
 // optional.
 func TestLoadEmptyPath(t *testing.T) {
