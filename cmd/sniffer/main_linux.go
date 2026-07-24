@@ -25,6 +25,11 @@ import (
 	"github.com/ecojuntak/network-sniffer/internal/resolver"
 )
 
+// procRoot is the procfs mount used for PID->pod resolution. With hostPID the
+// container's /proc reflects the host PID namespace, so host PIDs from the
+// probe resolve directly.
+const procRoot = "/proc"
+
 // dedupWindow suppresses repeated identical edges for this long.
 const dedupWindow = 30 * time.Second
 
@@ -66,6 +71,11 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer loader.Close()
+
+	// PID-based source resolution: recovers the owning pod for host-network /
+	// node-level source traffic (which shares the node IP) from the connecting
+	// process's cgroup. Reads the host procfs (DaemonSet runs with hostPID).
+	pids := resolver.NewProcResolver(ctrl.Cache(), procRoot)
 
 	// Log pipeline.
 	out := emit.New(os.Stdout)
@@ -110,7 +120,7 @@ func run(logger *slog.Logger) error {
 			continue
 		}
 
-		sc := enrich.Enrich(ev, ctrl.Cache())
+		sc := enrich.Enrich(ev, ctrl.Cache(), pids)
 		if deduper.Allow(sc, time.Now()) {
 			out.Log(sc)
 		}

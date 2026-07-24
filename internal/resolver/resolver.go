@@ -19,16 +19,22 @@ type Store interface {
 	LookupIP(ip netip.Addr) (model.Workload, bool)
 }
 
-// Cache is a concurrency-safe IP->Workload store fed by the k8s watch layer.
-// The zero value is not usable; construct with NewCache.
+// Cache is a concurrency-safe store fed by the k8s watch layer. It keys
+// workloads by both pod/node IP (byIP) and pod UID (byUID); the UID index backs
+// PID-based source resolution, where a local process's cgroup yields the pod
+// UID but not an IP. The zero value is not usable; construct with NewCache.
 type Cache struct {
-	mu   sync.RWMutex
-	byIP map[netip.Addr]model.Workload
+	mu    sync.RWMutex
+	byIP  map[netip.Addr]model.Workload
+	byUID map[string]model.Workload
 }
 
 // NewCache returns an empty, ready-to-use cache.
 func NewCache() *Cache {
-	return &Cache{byIP: make(map[netip.Addr]model.Workload)}
+	return &Cache{
+		byIP:  make(map[netip.Addr]model.Workload),
+		byUID: make(map[string]model.Workload),
+	}
 }
 
 // LookupIP implements Store.
@@ -51,6 +57,29 @@ func (c *Cache) Delete(ip netip.Addr) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.byIP, ip.Unmap())
+}
+
+// UpsertUID records (or replaces) the workload owning the pod with this UID.
+func (c *Cache) UpsertUID(uid string, w model.Workload) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.byUID[uid] = w
+}
+
+// LookupUID returns the workload for a pod UID and true, or a zero Workload and
+// false when the UID is unknown.
+func (c *Cache) LookupUID(uid string) (model.Workload, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	w, ok := c.byUID[uid]
+	return w, ok
+}
+
+// DeleteUID removes a pod UID from the cache. Deleting an absent UID is a no-op.
+func (c *Cache) DeleteUID(uid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byUID, uid)
 }
 
 // Len returns the number of cached addresses.

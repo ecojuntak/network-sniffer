@@ -20,12 +20,12 @@ import (
 // Loader owns the attached eBPF objects and the ring-buffer reader.
 type Loader struct {
 	objs   snifferObjects
-	link   link.Link
+	links  []link.Link
 	reader *ringbuf.Reader
 }
 
 // New removes the memlock limit, loads the compiled objects, attaches the
-// tracepoint and opens the ring buffer.
+// tracepoint and the tcp_connect kprobe, and opens the ring buffer.
 func New() (*Loader, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("remove memlock: %w", err)
@@ -36,20 +36,37 @@ func New() (*Loader, error) {
 		return nil, fmt.Errorf("load bpf objects: %w", err)
 	}
 
+	var links []link.Link
+	closeAll := func() {
+		for _, l := range links {
+			l.Close()
+		}
+		objs.Close()
+	}
+
 	tp, err := link.Tracepoint("sock", "inet_sock_set_state", objs.HandleSetState, nil)
 	if err != nil {
-		objs.Close()
+		closeAll()
 		return nil, fmt.Errorf("attach tracepoint: %w", err)
 	}
+	links = append(links, tp)
+
+	// Kprobe on tcp_connect records the connecting task's PID in process
+	// context; the tracepoint joins it onto the emitted edge. See bpf/sniffer.c.
+	kp, err := link.Kprobe("tcp_connect", objs.HandleTcpConnect, nil)
+	if err != nil {
+		closeAll()
+		return nil, fmt.Errorf("attach tcp_connect kprobe: %w", err)
+	}
+	links = append(links, kp)
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
-		tp.Close()
-		objs.Close()
+		closeAll()
 		return nil, fmt.Errorf("open ringbuf: %w", err)
 	}
 
-	return &Loader{objs: objs, link: tp, reader: rd}, nil
+	return &Loader{objs: objs, links: links, reader: rd}, nil
 }
 
 // Read blocks until the next raw event record is available and returns its
@@ -71,8 +88,8 @@ func (l *Loader) Close() error {
 	if l.reader != nil {
 		errs = append(errs, l.reader.Close())
 	}
-	if l.link != nil {
-		errs = append(errs, l.link.Close())
+	for _, l := range l.links {
+		errs = append(errs, l.Close())
 	}
 	errs = append(errs, l.objs.Close())
 	return errors.Join(errs...)

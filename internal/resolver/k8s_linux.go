@@ -88,17 +88,28 @@ func (c *Controller) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// onPod indexes a pod's IPs to its resolved workload.
+// onPod indexes a pod's IPs to its resolved workload, and indexes the pod UID
+// unconditionally to back PID-based source resolution.
 func (c *Controller) onPod(obj any) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		return
 	}
+	wl := ResolveTopOwner("Pod", pod.Namespace, pod.Name, c.lookup)
+
+	// Index by UID for every pod, including host-network ones: the UID index is
+	// keyed by cgroup identity, not IP, so it is the only way to attribute
+	// host-network source traffic (which shares the node IP) to the exact pod.
+	if uid := string(pod.UID); uid != "" {
+		c.cache.UpsertUID(uid, wl)
+	}
+
 	// Host-network pods (e.g. the sniffer DaemonSet, kube-proxy, CNI agents)
-	// report the node IP as their pod IP. Indexing that would map the node's
-	// host IP — and therefore every connection to it — to a single workload,
-	// producing phantom edges like dest=network-sniffer for traffic the pod
-	// never received. Skip them; such node-IP traffic resolves as external.
+	// report the node IP as their pod IP. Indexing that by IP would map the
+	// node's host IP — and therefore every connection to it — to a single
+	// workload, producing phantom edges like dest=network-sniffer for traffic
+	// the pod never received. Skip IP indexing; their node IP resolves to a
+	// Node via onNode, and their source traffic upgrades via the UID index.
 	if pod.Spec.HostNetwork {
 		return
 	}
@@ -106,7 +117,6 @@ func (c *Controller) onPod(obj any) {
 	if len(ips) == 0 {
 		return // not scheduled / no IP yet
 	}
-	wl := ResolveTopOwner("Pod", pod.Namespace, pod.Name, c.lookup)
 	for _, ip := range ips {
 		c.cache.Upsert(ip, wl)
 	}
@@ -128,6 +138,9 @@ func (c *Controller) onPodDelete(obj any) {
 	}
 	for _, ip := range podIPs(pod) {
 		c.cache.Delete(ip)
+	}
+	if uid := string(pod.UID); uid != "" {
+		c.cache.DeleteUID(uid)
 	}
 }
 

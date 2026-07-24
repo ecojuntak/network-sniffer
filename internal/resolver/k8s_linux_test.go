@@ -272,6 +272,72 @@ func TestControllerNodeDeleteTombstone(t *testing.T) {
 	}
 }
 
+// onPod must index every pod by UID — including host-network pods, whose IP is
+// deliberately not indexed — so PID-based source resolution can attribute their
+// traffic to the exact workload.
+func TestControllerIndexesPodByUID(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "api-0", Namespace: "shop", UID: "3f8e3c4d-1a2b-4c5d-8e9f-0a1b2c3d4e5f",
+			OwnerReferences: []metav1.OwnerReference{ctrlRef("StatefulSet", "api")},
+		},
+		Status: corev1.PodStatus{PodIP: "10.0.0.9"},
+	}
+	seed(t, c, pod)
+	c.onPod(pod)
+
+	got, ok := c.cache.LookupUID("3f8e3c4d-1a2b-4c5d-8e9f-0a1b2c3d4e5f")
+	if !ok {
+		t.Fatal("pod not indexed by UID")
+	}
+	if want := (model.Workload{Name: "api", Namespace: "shop", Kind: "StatefulSet"}); got != want {
+		t.Fatalf("UID workload = %+v, want %+v", got, want)
+	}
+}
+
+func TestControllerIndexesHostNetworkPodByUID(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-exporter-x", Namespace: "monitoring", UID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			OwnerReferences: []metav1.OwnerReference{ctrlRef("DaemonSet", "node-exporter")},
+		},
+		Spec:   corev1.PodSpec{HostNetwork: true},
+		Status: corev1.PodStatus{PodIP: "10.20.30.40"},
+	}
+	seed(t, c, pod)
+	c.onPod(pod)
+
+	// IP index skipped for host-network...
+	if c.cache.Len() != 0 {
+		t.Fatalf("cache byIP Len = %d, want 0 for host-network pod", c.cache.Len())
+	}
+	// ...but UID index populated.
+	got, ok := c.cache.LookupUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	if !ok || got.Name != "node-exporter" || got.Kind != "DaemonSet" {
+		t.Fatalf("host-network pod UID workload = %+v,%v want node-exporter/DaemonSet", got, ok)
+	}
+}
+
+func TestControllerPodDeleteRemovesUID(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset())
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "p", Namespace: "ns", UID: "11112222-3333-4444-5555-666677778888",
+			OwnerReferences: []metav1.OwnerReference{ctrlRef("StatefulSet", "s")},
+		},
+		Status: corev1.PodStatus{PodIP: "10.0.0.9"},
+	}
+	seed(t, c, pod)
+	c.onPod(pod)
+	c.onPodDelete(pod)
+
+	if _, ok := c.cache.LookupUID("11112222-3333-4444-5555-666677778888"); ok {
+		t.Fatal("pod UID still cached after delete")
+	}
+}
+
 func TestControllerDualStackIPs(t *testing.T) {
 	c := NewController(fake.NewSimpleClientset())
 	pod := &corev1.Pod{

@@ -17,7 +17,7 @@ VMLINUX      := $(BPF_DIR)/vmlinux.h
 # Pinned libbpf release whose CO-RE headers we vendor for bpf2go.
 LIBBPF_VERSION ?= v1.5.0
 LIBBPF_RAW     := https://raw.githubusercontent.com/libbpf/libbpf/$(LIBBPF_VERSION)/src
-LIBBPF_HEADERS := bpf_helpers.h bpf_helper_defs.h bpf_endian.h bpf_core_read.h
+LIBBPF_HEADERS := bpf_helpers.h bpf_helper_defs.h bpf_endian.h bpf_core_read.h bpf_tracing.h
 
 .PHONY: all
 all: test build
