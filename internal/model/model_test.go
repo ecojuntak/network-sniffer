@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+func TestNormalizeL7(t *testing.T) {
+	tests := []struct {
+		name        string
+		appProtocol string
+		portName    string
+		want        string
+	}{
+		{"appProtocol wins over name", "grpc", "http-web", "grpc"},
+		{"appProtocol grpc-web kept whole", "grpc-web", "", "grpc-web"},
+		{"name prefix http", "", "http-web", "http"},
+		{"name prefix grpc", "", "grpc", "grpc"},
+		{"name prefix http2", "", "http2-foo", "http2"},
+		{"bare tcp name", "", "tcp", "tcp"},
+		{"unrecognized name -> empty", "", "metrics", ""},
+		{"unrecognized prefix -> empty", "", "admin-web", ""},
+		{"empty inputs -> empty", "", "", ""},
+		{"uppercase normalized", "GRPC", "", "grpc"},
+		{"whitespace trimmed", "  http  ", "", "http"},
+		{"unrecognized appProtocol falls through to empty", "thrift", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeL7(tt.appProtocol, tt.portName); got != tt.want {
+				t.Errorf("NormalizeL7(%q, %q) = %q, want %q", tt.appProtocol, tt.portName, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProtocolString(t *testing.T) {
 	tests := []struct {
 		name string

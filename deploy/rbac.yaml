@@ -21,6 +21,17 @@ rules:
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]
+  # Map ClusterIP:port to the L7 (application) protocol declared by the Service
+  # port (appProtocol field or Istio name convention), so edges report http/grpc
+  # instead of bare tcp.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # Map backing podIP:targetPort to the same L7 protocol (mirrored onto the
+  # EndpointSlice ports), covering destinations whose socket saw the pod IP.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
   # Resolve Istio ServiceEntry VIPs (incl. auto-allocated 240.240.0.0/16) to
   # their external host. Only exercised when istio.enabled is set in config;
   # inert (and harmless) on clusters without the Istio CRD.

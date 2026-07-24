@@ -19,21 +19,38 @@ type Store interface {
 	LookupIP(ip netip.Addr) (model.Workload, bool)
 }
 
+// PortStore resolves the application-layer (L7) protocol of a destination
+// endpoint from its IP and port, as declared by the Kubernetes Service /
+// EndpointSlice port metadata. It returns the protocol token ("http", "grpc",
+// ...) and true, or "" and false when the endpoint carries no L7 declaration.
+type PortStore interface {
+	LookupPort(ip netip.Addr, port uint16) (l7 string, ok bool)
+}
+
+// portKey identifies a destination endpoint in the L7 port index. The IP is
+// Unmap'd so v4-mapped v6 addresses key identically to their v4 form.
+type portKey struct {
+	ip   netip.Addr
+	port uint16
+}
+
 // Cache is a concurrency-safe store fed by the k8s watch layer. It keys
 // workloads by both pod/node IP (byIP) and pod UID (byUID); the UID index backs
 // PID-based source resolution, where a local process's cgroup yields the pod
 // UID but not an IP. The zero value is not usable; construct with NewCache.
 type Cache struct {
-	mu    sync.RWMutex
-	byIP  map[netip.Addr]model.Workload
-	byUID map[string]model.Workload
+	mu     sync.RWMutex
+	byIP   map[netip.Addr]model.Workload
+	byUID  map[string]model.Workload
+	byPort map[portKey]string
 }
 
 // NewCache returns an empty, ready-to-use cache.
 func NewCache() *Cache {
 	return &Cache{
-		byIP:  make(map[netip.Addr]model.Workload),
-		byUID: make(map[string]model.Workload),
+		byIP:   make(map[netip.Addr]model.Workload),
+		byUID:  make(map[string]model.Workload),
+		byPort: make(map[portKey]string),
 	}
 }
 
@@ -80,6 +97,37 @@ func (c *Cache) DeleteUID(uid string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.byUID, uid)
+}
+
+// LookupPort implements PortStore, returning the L7 protocol declared for the
+// (ip, port) endpoint and true, or "" and false when none is indexed.
+func (c *Cache) LookupPort(ip netip.Addr, port uint16) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	l7, ok := c.byPort[portKey{ip: ip.Unmap(), port: port}]
+	return l7, ok
+}
+
+// UpsertPort records (or replaces) the L7 protocol for the (ip, port) endpoint.
+// An empty l7 clears any existing entry rather than indexing a blank protocol,
+// so a port whose metadata stops declaring a protocol reverts to L4 fallback.
+func (c *Cache) UpsertPort(ip netip.Addr, port uint16, l7 string) {
+	k := portKey{ip: ip.Unmap(), port: port}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if l7 == "" {
+		delete(c.byPort, k)
+		return
+	}
+	c.byPort[k] = l7
+}
+
+// DeletePort removes the (ip, port) endpoint from the L7 index. Deleting an
+// absent endpoint is a no-op.
+func (c *Cache) DeletePort(ip netip.Addr, port uint16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byPort, portKey{ip: ip.Unmap(), port: port})
 }
 
 // Len returns the number of cached addresses.

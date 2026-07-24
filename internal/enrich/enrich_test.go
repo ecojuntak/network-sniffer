@@ -16,7 +16,7 @@ func TestEnrichBothKnown(t *testing.T) {
 	c.Upsert(dst, model.Workload{Name: "checkout", Namespace: "shop", Kind: "Rollout"})
 
 	ev := model.ConnectionEvent{SrcIP: src, DstIP: dst, DstPort: 8080, Protocol: model.ProtocolTCP}
-	sc := Enrich(ev, c, nil)
+	sc := Enrich(ev, c, nil, nil)
 
 	if sc.Source.Name != "frontend" || sc.Source.Namespace != "shop" {
 		t.Errorf("source = %+v", sc.Source)
@@ -42,7 +42,7 @@ func TestEnrichExternalDestination(t *testing.T) {
 		DstPort:  443,
 		Protocol: model.ProtocolTCP,
 	}
-	sc := Enrich(ev, c, nil)
+	sc := Enrich(ev, c, nil, nil)
 
 	if sc.Source.Name != "worker" {
 		t.Errorf("source = %+v, want worker", sc.Source)
@@ -81,7 +81,7 @@ func TestEnrichPIDUpgradesNodeSource(t *testing.T) {
 	pids := fakePIDStore{pid: 4242, wl: pod}
 
 	ev := model.ConnectionEvent{SrcIP: nodeIP, DstIP: dst, DstPort: 9100, Protocol: model.ProtocolTCP, PID: 4242}
-	sc := Enrich(ev, c, pids)
+	sc := Enrich(ev, c, pids, nil)
 
 	if sc.Source != pod {
 		t.Fatalf("source = %+v, want %+v", sc.Source, pod)
@@ -101,7 +101,7 @@ func TestEnrichPIDUpgradesExternalSource(t *testing.T) {
 		Protocol: model.ProtocolTCP,
 		PID:      10,
 	}
-	sc := Enrich(ev, c, pids)
+	sc := Enrich(ev, c, pids, nil)
 	if sc.Source != pod {
 		t.Fatalf("source = %+v, want %+v", sc.Source, pod)
 	}
@@ -117,7 +117,7 @@ func TestEnrichPIDDoesNotOverridePodIP(t *testing.T) {
 
 	pids := fakePIDStore{pid: 4242, wl: model.Workload{Name: "WRONG", Kind: "DaemonSet"}}
 	ev := model.ConnectionEvent{SrcIP: src, DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 80, Protocol: model.ProtocolTCP, PID: 4242}
-	sc := Enrich(ev, c, pids)
+	sc := Enrich(ev, c, pids, nil)
 
 	if sc.Source != ipPod {
 		t.Fatalf("source = %+v, want pod-IP result %+v (PID must not override)", sc.Source, ipPod)
@@ -133,10 +133,43 @@ func TestEnrichPIDMissKeepsNode(t *testing.T) {
 
 	pids := fakePIDStore{pid: 4242, wl: model.Workload{Name: "x"}}
 	ev := model.ConnectionEvent{SrcIP: nodeIP, DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 9100, Protocol: model.ProtocolTCP, PID: 999}
-	sc := Enrich(ev, c, pids)
+	sc := Enrich(ev, c, pids, nil)
 
 	if sc.Source != node {
 		t.Fatalf("source = %+v, want node %+v", sc.Source, node)
+	}
+}
+
+// The destination's L7 protocol is resolved from the port store when the
+// (dstIP, dstPort) endpoint declares one.
+func TestEnrichResolvesAppProtocol(t *testing.T) {
+	c := resolver.NewCache()
+	src := netip.MustParseAddr("10.0.0.1")
+	dst := netip.MustParseAddr("10.0.0.2")
+	c.Upsert(src, model.Workload{Name: "frontend", Namespace: "shop", Kind: "Deployment"})
+	c.Upsert(dst, model.Workload{Name: "checkout", Namespace: "shop", Kind: "Rollout"})
+	c.UpsertPort(dst, 8080, "grpc")
+
+	ev := model.ConnectionEvent{SrcIP: src, DstIP: dst, DstPort: 8080, Protocol: model.ProtocolTCP}
+	sc := Enrich(ev, c, nil, c)
+
+	if sc.DestAppProtocol != "grpc" {
+		t.Errorf("app protocol = %q, want grpc", sc.DestAppProtocol)
+	}
+}
+
+// An unindexed endpoint leaves DestAppProtocol empty (callers fall back to L4).
+func TestEnrichUnknownAppProtocol(t *testing.T) {
+	c := resolver.NewCache()
+	src := netip.MustParseAddr("10.0.0.1")
+	dst := netip.MustParseAddr("10.0.0.2")
+	c.Upsert(src, model.Workload{Name: "frontend", Namespace: "shop", Kind: "Deployment"})
+
+	ev := model.ConnectionEvent{SrcIP: src, DstIP: dst, DstPort: 8080, Protocol: model.ProtocolTCP}
+	sc := Enrich(ev, c, nil, c)
+
+	if sc.DestAppProtocol != "" {
+		t.Errorf("app protocol = %q, want empty", sc.DestAppProtocol)
 	}
 }
 
@@ -148,7 +181,7 @@ func TestEnrichBothUnknown(t *testing.T) {
 		DstPort:  53,
 		Protocol: model.ProtocolUDP,
 	}
-	sc := Enrich(ev, c, nil)
+	sc := Enrich(ev, c, nil, nil)
 	if !sc.Source.IsExternal() || !sc.Dest.IsExternal() {
 		t.Fatalf("expected both external, got src=%+v dst=%+v", sc.Source, sc.Dest)
 	}

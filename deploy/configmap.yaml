@@ -12,7 +12,7 @@ data:
     # the serviceentries RBAC in rbac.yaml). Requires istiod to expose the
     # allocated IPs in the ServiceEntry spec.addresses or status.addresses.
     istio:
-      enabled: false
+      enabled: true
       # apiVersion: v1beta1   # override the ServiceEntry API version if needed
 
     # Workloads to exclude from the dependency map at emit time.
@@ -37,6 +37,11 @@ data:
       - "*/istiod"
       - "monitoring/*"
       - "*/vmagent-*"
+      - "amazon-guardduty/*"
+      - "castai-agent/*"
+      - "metrics/*"
+      - "/100.*"
+      - "wiz/*"
       # external / private IP peers (empty namespace, named by IP)
       - "*/10.*"
       - "*/172.1*"

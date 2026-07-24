@@ -156,7 +156,7 @@ func run(logger *slog.Logger, configPath string) error {
 			continue
 		}
 
-		sc := enrich.Enrich(ev, ctrl.Cache(), pids)
+		sc := enrich.Enrich(ev, ctrl.Cache(), pids, ctrl.Cache())
 		if matcher.ShouldIgnoreCall(sc) {
 			continue
 		}

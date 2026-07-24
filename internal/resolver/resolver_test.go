@@ -162,3 +162,48 @@ func TestCacheConcurrentAccess(t *testing.T) {
 		t.Fatalf("Len = %d, want 50", c.Len())
 	}
 }
+
+func TestCachePortUpsertLookupDelete(t *testing.T) {
+	c := NewCache()
+	ip := netip.MustParseAddr("10.0.0.2")
+
+	if _, ok := c.LookupPort(ip, 8080); ok {
+		t.Fatal("empty cache returned a port entry")
+	}
+
+	c.UpsertPort(ip, 8080, "grpc")
+	if l7, ok := c.LookupPort(ip, 8080); !ok || l7 != "grpc" {
+		t.Fatalf("LookupPort = %q,%v want grpc,true", l7, ok)
+	}
+	// A different port on the same IP is a distinct key.
+	if _, ok := c.LookupPort(ip, 9090); ok {
+		t.Fatal("unrelated port resolved")
+	}
+
+	c.DeletePort(ip, 8080)
+	if _, ok := c.LookupPort(ip, 8080); ok {
+		t.Fatal("port entry survived delete")
+	}
+}
+
+// UpsertPort with an empty protocol clears any existing entry rather than
+// indexing a blank protocol.
+func TestCachePortUpsertEmptyClears(t *testing.T) {
+	c := NewCache()
+	ip := netip.MustParseAddr("10.0.0.2")
+	c.UpsertPort(ip, 8080, "http")
+	c.UpsertPort(ip, 8080, "")
+	if _, ok := c.LookupPort(ip, 8080); ok {
+		t.Fatal("empty upsert did not clear the entry")
+	}
+}
+
+// A v4-mapped v6 destination keys identically to its v4 form.
+func TestCachePortUnmapsAddresses(t *testing.T) {
+	c := NewCache()
+	c.UpsertPort(netip.MustParseAddr("10.0.0.2"), 8080, "grpc")
+	mapped := netip.MustParseAddr("::ffff:10.0.0.2")
+	if l7, ok := c.LookupPort(mapped, 8080); !ok || l7 != "grpc" {
+		t.Fatalf("mapped lookup = %q,%v want grpc,true", l7, ok)
+	}
+}

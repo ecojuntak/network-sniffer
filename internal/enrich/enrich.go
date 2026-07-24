@@ -26,17 +26,27 @@ type PIDStore interface {
 // to recover the exact owning pod. The PID path never overrides a concrete
 // pod-IP match, guarding against a stale or reused PID displacing good data.
 // Destinations are remote, so they are always IP-resolved.
-func Enrich(ev model.ConnectionEvent, store resolver.Store, pids PIDStore) model.ServiceCall {
+//
+// The destination's application-layer protocol is resolved from the Kubernetes
+// Service / EndpointSlice port metadata via ports; a nil ports store, or a
+// destination whose port declares no recognized protocol, leaves
+// DestAppProtocol empty and callers fall back to the L4 protocol.
+func Enrich(ev model.ConnectionEvent, store resolver.Store, pids PIDStore, ports resolver.PortStore) model.ServiceCall {
 	source := resolver.WorkloadForIP(store, ev.SrcIP)
 	if pids != nil && (source.Kind == model.KindNode || source.IsExternal()) {
 		if w, ok := pids.LookupPID(ev.PID); ok {
 			source = w
 		}
 	}
+	var l7 string
+	if ports != nil {
+		l7, _ = ports.LookupPort(ev.DstIP, ev.DstPort)
+	}
 	return model.ServiceCall{
-		Source:       source,
-		Dest:         resolver.WorkloadForIP(store, ev.DstIP),
-		DestPort:     ev.DstPort,
-		DestProtocol: ev.Protocol,
+		Source:          source,
+		Dest:            resolver.WorkloadForIP(store, ev.DstIP),
+		DestPort:        ev.DstPort,
+		DestProtocol:    ev.Protocol,
+		DestAppProtocol: l7,
 	}
 }

@@ -18,6 +18,7 @@ const (
 	FieldDestNamespace   = "dest_namespace"
 	FieldDestPort        = "dest_port"
 	FieldDestProtocol    = "dest_protocol"
+	FieldDestAppProtocol = "dest_app_protocol"
 )
 
 // Message is the constant log message under which every edge is recorded.
@@ -48,5 +49,15 @@ func (l *Logger) Log(sc model.ServiceCall) {
 		slog.String(FieldDestNamespace, sc.Dest.Namespace),
 		slog.Int(FieldDestPort, int(sc.DestPort)),
 		slog.String(FieldDestProtocol, sc.DestProtocol.String()),
+		slog.String(FieldDestAppProtocol, appProtocol(sc)),
 	)
+}
+
+// appProtocol returns the resolved L7 protocol, falling back to the L4 name
+// when no application protocol was resolved, so the field is never empty.
+func appProtocol(sc model.ServiceCall) string {
+	if sc.DestAppProtocol != "" {
+		return sc.DestAppProtocol
+	}
+	return sc.DestProtocol.String()
 }

@@ -58,6 +58,8 @@ func (c *Controller) Cache() *Cache { return c.cache }
 func (c *Controller) Run(ctx context.Context) error {
 	podInformer := c.factory.Core().V1().Pods().Informer()
 	nodeInformer := c.factory.Core().V1().Nodes().Informer()
+	svcInformer := c.factory.Core().V1().Services().Informer()
+	epInformer := c.factory.Discovery().V1().EndpointSlices().Informer()
 	// Realise the ReplicaSet informer so its lister is populated.
 	_ = c.factory.Apps().V1().ReplicaSets().Informer()
 
@@ -75,6 +77,26 @@ func (c *Controller) Run(ctx context.Context) error {
 		DeleteFunc: c.onNodeDelete,
 	}); err != nil {
 		return fmt.Errorf("add node event handler: %w", err)
+	}
+
+	// Services index ClusterIP:port -> L7 protocol; EndpointSlices index the
+	// backing podIP:targetPort -> L7 protocol. Both feed the same byPort store so
+	// a destination resolves its application protocol whether the socket saw the
+	// ClusterIP (pre-DNAT) or the pod IP (post-DNAT / Istio mesh).
+	if _, err := svcInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { c.onService(obj) },
+		UpdateFunc: func(old, obj any) { c.onServiceUpdate(old, obj) },
+		DeleteFunc: c.onServiceDelete,
+	}); err != nil {
+		return fmt.Errorf("add service event handler: %w", err)
+	}
+
+	if _, err := epInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { c.onEndpointSlice(obj) },
+		UpdateFunc: func(old, obj any) { c.onEndpointSliceUpdate(old, obj) },
+		DeleteFunc: c.onEndpointSliceDelete,
+	}); err != nil {
+		return fmt.Errorf("add endpointslice event handler: %w", err)
 	}
 
 	c.factory.Start(ctx.Done())

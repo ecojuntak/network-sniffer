@@ -7,6 +7,7 @@ package model
 import (
 	"fmt"
 	"net/netip"
+	"strings"
 )
 
 // Protocol is the L4 protocol number as reported by the kernel (IP protocol).
@@ -31,6 +32,43 @@ func (p Protocol) String() string {
 	default:
 		return fmt.Sprintf("proto-%d", uint8(p))
 	}
+}
+
+// recognizedL7 is the set of application-layer protocol tokens the sniffer
+// reports. It mirrors Istio's protocol-selection vocabulary (appProtocol values
+// and port-name prefixes). Tokens outside this set — e.g. a port named
+// "metrics" or "admin" — are treated as unknown and fall back to the L4 name,
+// so operational port names never masquerade as protocols.
+var recognizedL7 = map[string]struct{}{
+	"http":     {},
+	"http2":    {},
+	"https":    {},
+	"grpc":     {},
+	"grpc-web": {},
+	"tcp":      {},
+	"tls":      {},
+	"mongo":    {},
+	"mysql":    {},
+	"redis":    {},
+	"udp":      {},
+}
+
+// NormalizeL7 derives the application-layer protocol of a service port from its
+// Kubernetes metadata, following the same rules Istio uses. appProtocol takes
+// precedence when set; otherwise the port name's prefix before the first "-" is
+// used (Istio's `<protocol>[-<suffix>]` convention, e.g. "grpc", "http-web").
+// The result is lowercased and validated against recognizedL7; an unrecognized
+// or empty input returns "" so callers fall back to the L4 protocol.
+func NormalizeL7(appProtocol, portName string) string {
+	token := strings.ToLower(strings.TrimSpace(appProtocol))
+	if token == "" {
+		name := strings.ToLower(strings.TrimSpace(portName))
+		token, _, _ = strings.Cut(name, "-")
+	}
+	if _, ok := recognizedL7[token]; ok {
+		return token
+	}
+	return ""
 }
 
 // ConnectionEvent is one connection observed by the eBPF probe. Addresses are
@@ -152,4 +190,8 @@ type ServiceCall struct {
 	Dest         Workload
 	DestPort     uint16
 	DestProtocol Protocol
+	// DestAppProtocol is the resolved L7 protocol of the destination port
+	// ("http", "grpc", ...) derived from the Kubernetes Service/EndpointSlice
+	// port metadata. Empty when unknown; consumers fall back to DestProtocol.
+	DestAppProtocol string
 }

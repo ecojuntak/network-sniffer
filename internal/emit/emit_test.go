@@ -46,6 +46,50 @@ func TestLogEmitsContractFields(t *testing.T) {
 	}
 }
 
+func TestLogAppProtocol(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(&buf)
+	l.Log(model.ServiceCall{
+		Source:          model.Workload{Name: "frontend", Namespace: "shop", Kind: "Deployment"},
+		Dest:            model.Workload{Name: "checkout", Namespace: "shop", Kind: "Rollout"},
+		DestPort:        8080,
+		DestProtocol:    model.ProtocolTCP,
+		DestAppProtocol: "grpc",
+	})
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if rec[FieldDestAppProtocol] != "grpc" {
+		t.Errorf("app protocol = %v, want grpc", rec[FieldDestAppProtocol])
+	}
+	// L4 field stays authoritative and untouched.
+	if rec[FieldDestProtocol] != "tcp" {
+		t.Errorf("L4 protocol = %v, want tcp", rec[FieldDestProtocol])
+	}
+}
+
+func TestLogAppProtocolFallsBackToL4(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(&buf)
+	l.Log(model.ServiceCall{
+		Source:       model.Workload{Name: "a", Namespace: "ns", Kind: "Deployment"},
+		Dest:         model.Workload{Name: "b", Namespace: "ns", Kind: "Deployment"},
+		DestPort:     5432,
+		DestProtocol: model.ProtocolTCP,
+		// DestAppProtocol unset: field must fall back to the L4 name.
+	})
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if rec[FieldDestAppProtocol] != "tcp" {
+		t.Errorf("app protocol = %v, want tcp fallback", rec[FieldDestAppProtocol])
+	}
+}
+
 func TestLogExternalDestination(t *testing.T) {
 	var buf bytes.Buffer
 	l := New(&buf)
