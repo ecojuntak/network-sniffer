@@ -38,7 +38,13 @@ type Controller struct {
 // NewController builds a Controller backed by the given clientset. Call Run to
 // start it and Cache to read resolved workloads.
 func NewController(cs kubernetes.Interface) *Controller {
-	factory := informers.NewSharedInformerFactory(cs, resyncPeriod)
+	// WithTransform trims every watched object to the fields this resolver reads
+	// (see trimObject) before it enters the informer store. On a large cluster
+	// each DaemonSet pod would otherwise cache full Pod/Service/EndpointSlice
+	// objects cluster-wide; trimming cuts that footprint by ~an order of
+	// magnitude.
+	factory := informers.NewSharedInformerFactoryWithOptions(cs, resyncPeriod,
+		informers.WithTransform(trimObject))
 	pods := factory.Core().V1().Pods().Lister()
 	rs := factory.Apps().V1().ReplicaSets().Lister()
 

@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: network-sniffer
-  namespace: canary-prober
+  namespace: default
   labels:
     app.kubernetes.io/name: network-sniffer
 spec:
@@ -20,15 +20,25 @@ spec:
       hostNetwork: true
       hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: ip-172-23-91-247.eu-west-1.compute.internal
       # Run on every node, including control-plane.
       containers:
         - name: sniffer
-          image: ecojuntak/network-sniffer:v1.5.0
+          image: ecojuntak/network-sniffer:v1.6.0
           imagePullPolicy: IfNotPresent
           # Ignore-list config, mounted from the network-sniffer ConfigMap.
           args:
             - "-config"
             - "/etc/network-sniffer/config.yaml"
+          env:
+            # Soft heap ceiling for the Go GC. Set below the 1Gi container limit
+            # (leaving headroom for BPF maps, goroutine stacks and off-heap
+            # allocations) so the GC collects harder as the heap approaches it,
+            # rather than the kernel OOM-killing the pod. Belt-and-suspenders
+            # alongside the informer WithTransform trimming.
+            - name: GOMEMLIMIT
+              value: "850MiB"
           securityContext:
             # eBPF tracepoint + ring buffer on kernels >= 5.8 need BPF+PERFMON;
             # SYS_RESOURCE covers the memlock rlimit. Fall back to
@@ -44,7 +54,7 @@ spec:
               cpu: 50m
               memory: 64Mi
             limits:
-              memory: 256Mi
+              memory: 1Gi
           volumeMounts:
             # CO-RE reads kernel BTF at runtime.
             - name: btf
