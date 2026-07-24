@@ -75,9 +75,13 @@ struct conn_event *unused_event __attribute__((unused));
 
 // handle_tcp_connect records the connecting task's identity keyed by the socket
 // pointer. tcp_connect runs in the process context of the connect() caller, so
-// the PID/comm here are the real client owner.
-SEC("kprobe/tcp_connect")
-int BPF_KPROBE(handle_tcp_connect, struct sock *sk)
+// the PID/comm here are the real client owner. It is an fentry (BTF) program
+// rather than a kprobe: fentry derives its arguments from BTF, so it compiles
+// arch-neutrally (bpfel) — a kprobe would need PT_REGS_PARM1, which requires a
+// concrete __TARGET_ARCH and breaks the single multi-arch object. BTF is
+// already a hard dependency (CO-RE reads /sys/kernel/btf).
+SEC("fentry/tcp_connect")
+int BPF_PROG(handle_tcp_connect, struct sock *sk)
 {
 	__u64 key = (__u64)sk;
 	struct pid_info info = {};

@@ -51,14 +51,15 @@ func New() (*Loader, error) {
 	}
 	links = append(links, tp)
 
-	// Kprobe on tcp_connect records the connecting task's PID in process
-	// context; the tracepoint joins it onto the emitted edge. See bpf/sniffer.c.
-	kp, err := link.Kprobe("tcp_connect", objs.HandleTcpConnect, nil)
+	// fentry on tcp_connect records the connecting task's PID in process
+	// context; the tracepoint joins it onto the emitted edge. fentry (not kprobe)
+	// keeps the eBPF object arch-neutral. See bpf/sniffer.c.
+	fe, err := link.AttachTracing(link.TracingOptions{Program: objs.HandleTcpConnect})
 	if err != nil {
 		closeAll()
-		return nil, fmt.Errorf("attach tcp_connect kprobe: %w", err)
+		return nil, fmt.Errorf("attach tcp_connect fentry: %w", err)
 	}
-	links = append(links, kp)
+	links = append(links, fe)
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
