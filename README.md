@@ -1,3 +1,5 @@
+> This project created as part of my learning about eBPF. The code mostly AI generated code.
+
 # Network Sniffer
 
 Network sniffer is an app deployed in a kubernetes cluster as a DaemonSet. It

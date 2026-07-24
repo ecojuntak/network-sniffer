@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: network-sniffer
+  namespace: canary-prober
+data:
+  config.yaml: |
+    # Workloads to exclude from the dependency map at emit time.
+    # Format: "<namespace>/<workload>", each segment a glob:
+    #   "*"          matches a whole segment (including an empty one)
+    #   "vmagent-*"  matches a prefix
+    #   ""           (empty segment) matches only the empty namespace
+    # "*/*" is rejected. An edge is dropped when EITHER endpoint matches.
+    #
+    # Node-level and external peers have an EMPTY namespace in this tool:
+    #   - Node identities are named "ip-<...>" (kubelet health probes, node
+    #     daemons) -> match with "/ip-*"
+    #   - External IP peers are named by their IP -> match with "*/10.*" etc.
+    ignore:
+      # kubelet / node-sourced probe traffic (e.g. Istio 15021 readiness)
+      - "/ip-*"
+      # cluster infrastructure namespaces
+      - "kube-system/*"
+      - "kube-public/*"
+      - "kube-node-lease/*"
+      - "istio-system/*"
+      - "*/istiod"
+      - "monitoring/*"
+      - "*/vmagent-*"
+      # external / private IP peers (empty namespace, named by IP)
+      - "*/10.*"
+      - "*/172.1*"
+      - "*/172.2*"
+      - "*/169.254.*"
+      - "*/127.*"

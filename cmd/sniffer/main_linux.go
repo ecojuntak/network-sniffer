@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -18,10 +19,12 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/ecojuntak/network-sniffer/internal/bpf"
+	"github.com/ecojuntak/network-sniffer/internal/config"
 	"github.com/ecojuntak/network-sniffer/internal/decode"
 	"github.com/ecojuntak/network-sniffer/internal/dedup"
 	"github.com/ecojuntak/network-sniffer/internal/emit"
 	"github.com/ecojuntak/network-sniffer/internal/enrich"
+	"github.com/ecojuntak/network-sniffer/internal/ignore"
 	"github.com/ecojuntak/network-sniffer/internal/resolver"
 )
 
@@ -37,16 +40,30 @@ const dedupWindow = 30 * time.Second
 const sweepInterval = time.Minute
 
 func main() {
+	configPath := flag.String("config", "", "path to the YAML config file (ignore list); empty disables it")
+	flag.Parse()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(logger, *configPath); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("sniffer exited with error", slog.Any("err", err))
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+func run(logger *slog.Logger, configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Ignore list: workload-pair globs whose edges are dropped before emission.
+	conf, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	matcher, err := ignore.Compile(conf.Ignore)
+	if err != nil {
+		return err
+	}
+	logger.Info("loaded ignore list", slog.Int("rules", len(conf.Ignore)))
 
 	// Kubernetes workload resolver (in-cluster).
 	cfg, err := rest.InClusterConfig()
@@ -121,6 +138,9 @@ func run(logger *slog.Logger) error {
 		}
 
 		sc := enrich.Enrich(ev, ctrl.Cache(), pids)
+		if matcher.ShouldIgnoreCall(sc) {
+			continue
+		}
 		if deduper.Allow(sc, time.Now()) {
 			out.Log(sc)
 		}
