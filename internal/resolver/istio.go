@@ -4,8 +4,57 @@ import (
 	"net/netip"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/ecojuntak/network-sniffer/internal/model"
 )
+
+// trimServiceEntry is the informer TransformFunc that strips a ServiceEntry to
+// only the paths parseServiceEntryVIPs reads — metadata.namespace/name,
+// spec.hosts, spec.addresses and status.addresses — before it enters the store.
+//
+// Unlike the typed core informers (trimmed by trimObject), the dynamic informer
+// would otherwise retain the entire object as a nested map[string]any: spec
+// ports, workload selectors, endpoints, resolution/location, plus managedFields,
+// annotations and labels. None of that is read here, and unstructured is the
+// heaviest representation client-go holds, so trimming at ingestion is the
+// single largest memory saving available for Istio resolution.
+//
+// Inputs that are not *unstructured.Unstructured (tombstone wrappers, unknown
+// types) are returned unchanged for the delete path (asUnstructured) to unwrap.
+func trimServiceEntry(obj any) (any, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return obj, nil
+	}
+	trimmed := make(map[string]any, 3)
+	if md, ok := u.Object["metadata"].(map[string]any); ok {
+		keep := make(map[string]any, 2)
+		if v, ok := md["namespace"]; ok {
+			keep["namespace"] = v
+		}
+		if v, ok := md["name"]; ok {
+			keep["name"] = v
+		}
+		trimmed["metadata"] = keep
+	}
+	if spec, ok := u.Object["spec"].(map[string]any); ok {
+		keep := make(map[string]any, 2)
+		if v, ok := spec["hosts"]; ok {
+			keep["hosts"] = v
+		}
+		if v, ok := spec["addresses"]; ok {
+			keep["addresses"] = v
+		}
+		trimmed["spec"] = keep
+	}
+	if status, ok := u.Object["status"].(map[string]any); ok {
+		if v, ok := status["addresses"]; ok {
+			trimmed["status"] = map[string]any{"addresses": v}
+		}
+	}
+	return &unstructured.Unstructured{Object: trimmed}, nil
+}
 
 // vipBinding pairs a ServiceEntry VIP with the workload it resolves to.
 type vipBinding struct {

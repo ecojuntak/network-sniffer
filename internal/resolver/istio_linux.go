@@ -48,6 +48,12 @@ func NewIstioController(dc dynamic.Interface, c *Cache, apiVersion string) *Isti
 // Run starts the ServiceEntry informer and blocks until ctx is cancelled.
 func (c *IstioController) Run(ctx context.Context) error {
 	informer := c.factory.ForResource(c.gvr).Informer()
+	// Trim each ServiceEntry to the few fields parseServiceEntryVIPs reads
+	// before it is cached; the dynamic informer would otherwise hold the whole
+	// object graph as a nested map. Must be set before the informer starts.
+	if err := informer.SetTransform(trimServiceEntry); err != nil {
+		return fmt.Errorf("set serviceentry transform: %w", err)
+	}
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { c.onServiceEntry(obj) },
 		UpdateFunc: func(_, obj any) { c.onServiceEntry(obj) },
