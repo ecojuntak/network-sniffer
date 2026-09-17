@@ -101,3 +101,115 @@ func TestParseEntriesNilSafe(t *testing.T) {
 		t.Error("endpointSliceEntries(nil) should be nil")
 	}
 }
+
+func TestEndpointSliceClusterIPEntries(t *testing.T) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop"},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:  "172.20.0.10",
+			ClusterIPs: []string{"172.20.0.10"},
+			Ports:      []corev1.ServicePort{{Name: "grpc", Port: 8080}},
+		},
+	}
+	es := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "checkout-abc", Namespace: "shop",
+			Labels: map[string]string{"kubernetes.io/service-name": "checkout"},
+		},
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.1.5", "10.0.1.6"}}},
+	}
+
+	entries := endpointSliceClusterIPEntries(es, svc)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].clusterIP.String() != "172.20.0.10" {
+		t.Errorf("got clusterIP %s, want 172.20.0.10", entries[0].clusterIP)
+	}
+	if entries[0].podIP.String() != "10.0.1.5" {
+		t.Errorf("got podIP %s, want 10.0.1.5 (first valid pod IP)", entries[0].podIP)
+	}
+}
+
+// A headless Service (no ClusterIP) produces no ClusterIP entries; its pods
+// are still covered via the port-index path (endpointSliceEntries).
+func TestEndpointSliceClusterIPEntriesHeadless(t *testing.T) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "headless", Namespace: "default"},
+		Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
+	}
+	es := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "headless-abc", Namespace: "default",
+			Labels: map[string]string{"kubernetes.io/service-name": "headless"},
+		},
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.1.5"}}},
+	}
+	if entries := endpointSliceClusterIPEntries(es, svc); entries != nil {
+		t.Errorf("headless service should produce no ClusterIP entries, got %d", len(entries))
+	}
+}
+
+// No backing pod IPs (e.g. an EndpointSlice with an empty address list) means
+// there is nothing to redirect the ClusterIP to.
+func TestEndpointSliceClusterIPEntriesNoPods(t *testing.T) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "default"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "172.20.0.20", ClusterIPs: []string{"172.20.0.20"}},
+	}
+	es := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "empty-abc", Namespace: "default",
+			Labels: map[string]string{"kubernetes.io/service-name": "empty"},
+		},
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{}}},
+	}
+	if entries := endpointSliceClusterIPEntries(es, svc); entries != nil {
+		t.Errorf("service with no pod IPs should produce no entries, got %d", len(entries))
+	}
+}
+
+// A dual-stack Service produces one entry per ClusterIP, all pointing at the
+// same backing pod IP.
+func TestEndpointSliceClusterIPEntriesMultipleClusterIPs(t *testing.T) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "dual-stack", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:  "172.20.0.30",
+			ClusterIPs: []string{"172.20.0.30", "fd00::1234"},
+		},
+	}
+	es := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "dual-stack-abc", Namespace: "default",
+			Labels: map[string]string{"kubernetes.io/service-name": "dual-stack"},
+		},
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.1.10"}}},
+	}
+
+	entries := endpointSliceClusterIPEntries(es, svc)
+	if len(entries) != 2 {
+		t.Fatalf("dual-stack service should produce 2 entries, got %d", len(entries))
+	}
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		seen[e.clusterIP.String()] = true
+		if e.podIP.String() != "10.0.1.10" {
+			t.Errorf("got podIP %s, want 10.0.1.10", e.podIP)
+		}
+	}
+	if !seen["172.20.0.30"] || !seen["fd00::1234"] {
+		t.Errorf("missing a ClusterIP entry, got %v", seen)
+	}
+}
+
+func TestEndpointSliceClusterIPEntriesNilSafe(t *testing.T) {
+	svc := &corev1.Service{Spec: corev1.ServiceSpec{ClusterIP: "172.20.0.1"}}
+	es := &discoveryv1.EndpointSlice{}
+	if endpointSliceClusterIPEntries(nil, svc) != nil {
+		t.Error("nil EndpointSlice should return nil")
+	}
+	if endpointSliceClusterIPEntries(es, nil) != nil {
+		t.Error("nil Service should return nil")
+	}
+}

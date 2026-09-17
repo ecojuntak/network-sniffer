@@ -99,3 +99,55 @@ func derefString(s *string) string {
 	}
 	return *s
 }
+
+// clusterIPEntry maps a Service's ClusterIP to a backing pod IP. When a
+// connection targets the ClusterIP (pre-DNAT, before kube-proxy/eBPF rewrites
+// it to a pod IP), this lets the resolver redirect the lookup: ClusterIP ->
+// pod IP -> workload, through the existing pod-IP cache lookup.
+type clusterIPEntry struct {
+	clusterIP netip.Addr
+	podIP     netip.Addr
+}
+
+// endpointSliceClusterIPEntries builds ClusterIP -> pod IP mappings for a
+// Service's ClusterIP addresses, one entry per ClusterIP, all pointing at the
+// first valid pod IP found in the EndpointSlice's endpoints. Returns nil for a
+// headless Service (no ClusterIP) or an EndpointSlice with no backing pod IP.
+//
+// Mapping to a pod IP rather than directly to a Workload avoids any
+// dependency on the pod already being in the cache at index time: the pod IP
+// is resolved to its workload through the normal pod-IP cache lookup whenever
+// the ClusterIP is looked up.
+func endpointSliceClusterIPEntries(es *discoveryv1.EndpointSlice, svc *corev1.Service) []clusterIPEntry {
+	if es == nil || svc == nil {
+		return nil
+	}
+	ips := clusterIPs(svc)
+	if len(ips) == 0 {
+		return nil
+	}
+
+	var podIP netip.Addr
+	var found bool
+	for _, ep := range es.Endpoints {
+		for _, addr := range ep.Addresses {
+			if ip, err := netip.ParseAddr(addr); err == nil {
+				podIP = ip
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+
+	out := make([]clusterIPEntry, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, clusterIPEntry{clusterIP: ip, podIP: podIP})
+	}
+	return out
+}

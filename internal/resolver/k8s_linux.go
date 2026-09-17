@@ -16,6 +16,7 @@ import (
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	batchlisters "k8s.io/client-go/listers/batch/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	discoverylisters "k8s.io/client-go/listers/discovery/v1"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/ecojuntak/network-sniffer/internal/model"
@@ -31,12 +32,14 @@ const resyncPeriod = 10 * time.Minute
 // to a Node identity so host-network and node-level traffic resolves to the
 // node name instead of a bare IP.
 type Controller struct {
-	cache      *Cache
-	factory    informers.SharedInformerFactory
-	pods       corelisters.PodLister
-	lookup     OwnerLookup
-	logger     *slog.Logger
-	syncedChan chan struct{} // closed once every informer has completed its initial sync
+	cache          *Cache
+	factory        informers.SharedInformerFactory
+	pods           corelisters.PodLister
+	services       corelisters.ServiceLister
+	endpointSlices discoverylisters.EndpointSliceLister
+	lookup         OwnerLookup
+	logger         *slog.Logger
+	syncedChan     chan struct{} // closed once every informer has completed its initial sync
 }
 
 // NewController builds a Controller backed by the given clientset. Call Run to
@@ -53,16 +56,20 @@ func NewController(cs kubernetes.Interface, logger *slog.Logger) *Controller {
 	factory := informers.NewSharedInformerFactoryWithOptions(cs, resyncPeriod,
 		informers.WithTransform(trimObject))
 	pods := factory.Core().V1().Pods().Lister()
+	services := factory.Core().V1().Services().Lister()
+	endpointSlices := factory.Discovery().V1().EndpointSlices().Lister()
 	rs := factory.Apps().V1().ReplicaSets().Lister()
 	jobs := factory.Batch().V1().Jobs().Lister()
 
 	return &Controller{
-		cache:      NewCache(),
-		factory:    factory,
-		pods:       pods,
-		lookup:     &listerOwnerLookup{pods: pods, rs: rs, jobs: jobs, logger: logger},
-		logger:     logger,
-		syncedChan: make(chan struct{}),
+		cache:          NewCache(),
+		factory:        factory,
+		pods:           pods,
+		services:       services,
+		endpointSlices: endpointSlices,
+		lookup:         &listerOwnerLookup{pods: pods, rs: rs, jobs: jobs, logger: logger},
+		logger:         logger,
+		syncedChan:     make(chan struct{}),
 	}
 }
 
@@ -167,6 +174,14 @@ func (c *Controller) Run(ctx context.Context) error {
 	) {
 		return fmt.Errorf("pod/node/service/endpointslice informers failed to sync")
 	}
+
+	// Now that every informer (Pods included) has synced, do a full ClusterIP
+	// pass: pod IPs are already cached, so every Service's ClusterIP resolves
+	// to a workload immediately rather than only after its next EndpointSlice
+	// event. Runs before closing syncedChan so a caller unblocked by
+	// WaitForSync never observes a ClusterIP miss for a Service that existed
+	// at startup.
+	c.reindexAllClusterIPs()
 
 	close(c.syncedChan)
 
