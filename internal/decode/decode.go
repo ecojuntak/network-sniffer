@@ -13,8 +13,9 @@
 //	37      1     protocol(IP protocol number)
 //	38      4     pid     (little-endian host order)
 //	42      16    comm    (NUL-padded process name)
+//	58      1     outbound(1 = locally initiated, 0 = accepted/inbound)
 //	--------------------------------------------------
-//	58            total
+//	59            total
 //
 // Offsets are read explicitly rather than via a struct so the decoder is
 // immune to Go/C struct-padding differences and is trivially testable.
@@ -29,7 +30,7 @@ import (
 )
 
 // EventSize is the fixed size in bytes of one raw event record.
-const EventSize = 58
+const EventSize = 59
 
 // Address family values as used by the kernel.
 const (
@@ -47,6 +48,7 @@ const (
 	offPID      = 38
 	offComm     = 42
 	commLen     = 16
+	offOutbound = 58
 )
 
 // ErrShortEvent is returned when the buffer is smaller than EventSize.
@@ -81,6 +83,7 @@ func Decode(b []byte) (model.ConnectionEvent, error) {
 		Protocol: model.Protocol(b[offProtocol]),
 		PID:      binary.LittleEndian.Uint32(b[offPID : offPID+4]),
 		Comm:     decodeComm(b[offComm : offComm+commLen]),
+		Outbound: b[offOutbound] != 0,
 	}, nil
 }
 

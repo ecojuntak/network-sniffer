@@ -14,10 +14,18 @@
 // which runs in the connecting task's process context — records the real
 // pid/comm into pid_by_sock keyed by the struct sock pointer. The tracepoint
 // then joins on that pointer to attach the correct owner to the emitted edge.
-// The entry is freed on the socket's TCP_CLOSE transition.
+// The entry is consumed and freed when the connection reaches ESTABLISHED (or
+// on TCP_CLOSE if it never does): an entry must never outlive its socket. A
+// leaked entry keyed by a freed struct sock address can hit on a later,
+// unrelated ACCEPTED socket that reuses the slab address, tagging it outbound
+// with a stale pid/comm — which launders a mirrored server-side record past
+// userspace's reversed-duplicate filter as a phantom edge carrying the
+// caller's ephemeral port. (Close-time cleanup alone is best-effort: sockets
+// that end in TIME_WAIT hand their state to a separate timewait mini-socket,
+// so the original struct sock may never see a traced TCP_CLOSE.)
 //
 // The emitted record layout MUST stay byte-for-byte in sync with the Go decoder
-// in internal/decode/decode.go (58 bytes, packed).
+// in internal/decode/decode.go (59 bytes, packed).
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -33,7 +41,7 @@
 char LICENSE[] SEC("license") = "GPL";
 
 // conn_event mirrors the Go wire format exactly. __attribute__((packed))
-// guarantees no compiler padding so the 58-byte layout is stable.
+// guarantees no compiler padding so the 59-byte layout is stable.
 struct conn_event {
 	__u8 saddr[16];
 	__u8 daddr[16];
@@ -43,6 +51,11 @@ struct conn_event {
 	__u8 protocol;
 	__u32 pid; // host byte order
 	char comm[16];
+	// outbound is 1 when this socket was initiated locally (the tcp_connect
+	// fentry recorded it) and 0 for accepted/inbound sockets. Userspace uses
+	// it to drop the reversed server-side record of in-cluster calls without
+	// relying on ephemeral-port heuristics.
+	__u8 outbound;
 } __attribute__((packed));
 
 // Ring buffer carrying events to userspace (256 KiB).
@@ -58,11 +71,12 @@ struct pid_info {
 };
 
 // pid_by_sock maps a struct sock pointer to the identity of the task that
-// initiated the connection. Populated by the tcp_connect kprobe, read by the
-// state-change tracepoint, freed on TCP_CLOSE. Sized for many concurrent
-// connections per node; LRU evicts the oldest if it ever fills, degrading
-// gracefully to no-PID (which resolves to the node/IP identity) rather than
-// failing.
+// initiated the connection. Populated by the tcp_connect fentry, consumed and
+// freed by the state-change tracepoint at ESTABLISHED, and freed on TCP_CLOSE
+// for connections that never establish. With only in-flight connects held, the
+// map stays small; LRU is a safety net, evicting the oldest if it ever fills —
+// degrading gracefully to no-PID (which resolves to the node/IP identity)
+// rather than failing.
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 65536);
@@ -96,9 +110,9 @@ int handle_set_state(struct trace_event_raw_inet_sock_set_state *ctx)
 {
 	__u64 sk = (__u64)ctx->skaddr;
 
-	// Free the pid_by_sock entry when the socket closes so the map does not
-	// accumulate stale connections (LRU also protects it, but explicit cleanup
-	// keeps it tight).
+	// Free the pid_by_sock entry when a socket closes without having reached
+	// ESTABLISHED (failed/refused connects); established connections free
+	// their entry when it is consumed below. LRU remains as a safety net.
 	if (ctx->newstate == TCP_CLOSE) {
 		bpf_map_delete_elem(&pid_by_sock, &sk);
 		return 0;
@@ -107,6 +121,28 @@ int handle_set_state(struct trace_event_raw_inet_sock_set_state *ctx)
 	// Only care about connections reaching ESTABLISHED.
 	if (ctx->newstate != TCP_ESTABLISHED)
 		return 0;
+
+	// Consume the pid_by_sock entry up front, before any early return below
+	// (unsupported family, ring-buffer full): its only job is to carry the
+	// connecting task's identity from tcp_connect to this transition, and
+	// ESTABLISHED fires exactly once per connection. Deleting here — not just
+	// at TCP_CLOSE, which sockets ending in TIME_WAIT may never fire for
+	// their struct sock — bounds an entry's lifetime to the
+	// connect->established window, so it always belongs to a live socket
+	// whose address cannot be reused. A leaked entry keyed by a freed sk
+	// address could otherwise hit on an unrelated ACCEPTED socket reusing the
+	// slab address, tagging it outbound with a stale pid/comm and laundering
+	// a mirrored server-side record past userspace's reversed-duplicate
+	// filter as a phantom edge carrying the caller's ephemeral port.
+	struct pid_info info = {};
+	__u8 have_info = 0;
+	struct pid_info *p = bpf_map_lookup_elem(&pid_by_sock, &sk);
+	if (p) {
+		info.pid = p->pid;
+		__builtin_memcpy(info.comm, p->comm, sizeof(info.comm));
+		have_info = 1;
+	}
+	bpf_map_delete_elem(&pid_by_sock, &sk); // no-op for accepted sockets
 
 	__u16 family = ctx->family;
 	if (family != AF_INET && family != AF_INET6)
@@ -134,14 +170,17 @@ int handle_set_state(struct trace_event_raw_inet_sock_set_state *ctx)
 	e->dport = bpf_htons(ctx->dport);
 	e->protocol = (__u8)ctx->protocol;
 
-	// Attach the connecting task recorded at tcp_connect. A miss (inbound
-	// connections, which have no local tcp_connect, or a map eviction) leaves
-	// pid=0/comm="" — the server side is dropped downstream by the ephemeral
-	// dest-port rule, and pid=0 signals "no process context" to the resolver.
-	struct pid_info *info = bpf_map_lookup_elem(&pid_by_sock, &sk);
-	if (info) {
-		e->pid = info->pid;
-		__builtin_memcpy(e->comm, info->comm, sizeof(e->comm));
+	// Attach the connecting task's identity and mark the record outbound.
+	// have_info=0 means an accepted/inbound socket (no local tcp_connect) or,
+	// rarely, an LRU eviction: pid=0/comm="" signals "no process context" to
+	// the resolver, and outbound=0 lets userspace orient the record
+	// caller->callee and drop it when the caller is in-cluster — the
+	// canonical edge is emitted on the caller's node — while keeping
+	// external->inbound edges, for which this record is the only capture.
+	if (have_info) {
+		e->pid = info.pid;
+		__builtin_memcpy(e->comm, info.comm, sizeof(e->comm));
+		e->outbound = 1;
 	}
 
 	bpf_ringbuf_submit(e, 0);

@@ -141,22 +141,33 @@ func run(logger *slog.Logger, configPath string) error {
 			continue
 		}
 
+		// Canonical orients every record caller->callee: accepted-side records
+		// arrive mirrored (the server's address and listening port in the
+		// source fields, the caller's address and ephemeral port in the
+		// destination fields) and are swapped, so the emitted destination port
+		// is the service's actual listening port. See model.go.
+		ev = ev.Canonical()
+
 		// Loopback is intra-pod (or host-local) traffic with no cross-workload
 		// dependency and no resolvable identity; drop it. Same for AWS-reserved
 		// fd00:ec2::/32 endpoints (metadata/DNS/NTP) and link-local addresses
 		// (169.254.0.0/16 IMDS incl. 169.254.169.254, fe80::/10): infrastructure,
 		// not workloads. IsSelfEdge drops src==dst traffic (host-network pod
 		// talking to itself over the node IP, e.g. node-exporter scrapes).
-		//
-		// HasEphemeralDestPort drops the server-side half of the tracepoint's
-		// two-sided capture: that record has the client's ephemeral port as its
-		// destination and is a reversed duplicate of the canonical caller->callee
-		// edge (which is captured from the client side). See model.go.
-		if ev.IsLoopback() || ev.IsSelfEdge() || ev.IsAWSReserved() || ev.IsLinkLocal() || ev.HasEphemeralDestPort() {
+		if ev.IsLoopback() || ev.IsSelfEdge() || ev.IsAWSReserved() || ev.IsLinkLocal() {
 			continue
 		}
 
 		sc := enrich.Enrich(ev, ctrl.Cache(), pids, ctrl.Cache())
+
+		// IsReversedDuplicate drops the accepted-side half of the tracepoint's
+		// two-sided capture when the caller is in-cluster: the caller's own
+		// node emits the canonical caller->callee edge. External callers are
+		// kept — the accepted-side record is the only capture of
+		// external -> in-cluster traffic. See model.go.
+		if ev.IsReversedDuplicate(sc.Source) {
+			continue
+		}
 		if matcher.ShouldIgnoreCall(sc) {
 			continue
 		}

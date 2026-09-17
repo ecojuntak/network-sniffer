@@ -83,6 +83,10 @@ type ConnectionEvent struct {
 	// resolution fallback and debugging. May be zero/empty.
 	PID  uint32
 	Comm string
+	// Outbound reports whether the connection was initiated locally (the
+	// tcp_connect fentry recorded the socket). False means an accepted /
+	// inbound socket — the server-side half of the two-sided capture.
+	Outbound bool
 }
 
 // IsLoopback reports whether either endpoint is a loopback address
@@ -131,25 +135,59 @@ func (e ConnectionEvent) IsLinkLocal() bool {
 	return e.SrcIP.IsLinkLocalUnicast() || e.DstIP.IsLinkLocalUnicast()
 }
 
-// EphemeralPortMin is the lowest port in the Linux default ephemeral range
-// (net.ipv4.ip_local_port_range = 32768-60999). Client sockets draw their
-// source port from this range; listening services almost always sit below it.
-const EphemeralPortMin uint16 = 32768
-
-// HasEphemeralDestPort reports whether the destination port is in the
-// ephemeral range. The `inet_sock_set_state` tracepoint fires for BOTH ends of
-// every connection, so a single call A->B:svc yields two events: the client
-// side (dst = B's service port) and the server side (dst = A's ephemeral port).
-// The client side is the canonical caller->callee edge and is always captured
-// (both sockets share a node for same-node pairs; cluster-wide the caller's own
-// node sees it). The server-side record is a reversed duplicate identifiable by
-// its ephemeral destination port, so the pipeline drops it — de-duplicating the
-// two-sided capture without correlating socket pairs.
+// Canonical returns the event in caller->callee orientation. Outbound records
+// already are: the local end initiated the connection, so the destination is
+// the remote service. Accepted-side records arrive mirrored — the local
+// (server) address and listening port occupy the source fields, the caller's
+// address and ephemeral source port the destination fields — so the tuples are
+// swapped: the caller becomes the source and the destination port becomes the
+// server's actual listening port. That makes kept external->in-cluster edges
+// correctly oriented and collapsible by dedup (one edge per caller, not one
+// per connection).
 //
-// Limitation: a service that listens on an ephemeral-range port is dropped too.
-// Rare in practice; revisit with a configurable threshold if it bites.
-func (e ConnectionEvent) HasEphemeralDestPort() bool {
-	return e.DstPort >= EphemeralPortMin
+// The Outbound flag is left untouched: it records which half of the connection
+// was observed locally and drives IsReversedDuplicate. PID/Comm are zero on
+// accepted-side records (no local process context for a remote caller), so
+// nothing is lost in the swap.
+func (e ConnectionEvent) Canonical() ConnectionEvent {
+	if e.Outbound {
+		return e
+	}
+	e.SrcIP, e.DstIP = e.DstIP, e.SrcIP
+	e.SrcPort, e.DstPort = e.DstPort, e.SrcPort
+	return e
+}
+
+// IsReversedDuplicate reports whether the event is the server-side half of the
+// tracepoint's two-sided capture of a call whose canonical caller->callee edge
+// is observed elsewhere. The `inet_sock_set_state` tracepoint fires for BOTH
+// ends of every connection: the locally-initiated side is marked Outbound (the
+// tcp_connect fentry recorded the socket) and is the canonical edge; the
+// accepted side is a reversed duplicate. Pass the Canonical() event and its
+// resolved source, i.e. the original caller.
+//
+// The reversed record is dropped when the caller resolves to an in-cluster
+// identity — a pod workload or a node — because the caller's own node emits
+// the canonical edge. It is kept when the caller is external: out-of-cluster
+// callers never execute a traced tcp_connect, so the accepted-side record is
+// the only capture of external -> in-cluster traffic.
+//
+// Deciding on the caller (not on the local endpoint) is what makes the rule
+// robust: the local side of an accepted socket can fail to resolve — e.g. a
+// host-network / hostPort service reached via the node's public IP, or an
+// informer cache gap — and a local-side check would then leak the mirrored
+// record through as a phantom edge "<caller-workload> receives traffic on an
+// ephemeral port".
+//
+// This replaces the former ephemeral-destination-port heuristic (drop when
+// dstPort >= 32768), which broke on nodes with a custom
+// net.ipv4.ip_local_port_range: with a range starting below 32768 (observed
+// 1037-32730 on EKS nodes tuned to avoid the NodePort range), client source
+// ports fell under the threshold and reversed records leaked through as
+// phantom inbound edges — e.g. a CronJob's outbound calls appearing as
+// hundreds of inbound edges to the CronJob on ever-changing ports.
+func (e ConnectionEvent) IsReversedDuplicate(source Workload) bool {
+	return !e.Outbound && !source.IsExternal()
 }
 
 // Workload identifies a kubernetes workload (the top-level owner of a pod,

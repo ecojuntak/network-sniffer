@@ -152,27 +152,50 @@ func TestConnectionEventIsLinkLocal(t *testing.T) {
 	}
 }
 
-func TestConnectionEventHasEphemeralDestPort(t *testing.T) {
+func TestConnectionEventCanonical(t *testing.T) {
+	outbound := ConnectionEvent{
+		SrcIP: netip.MustParseAddr("10.0.0.1"), SrcPort: 54321,
+		DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 8080,
+		PID: 42, Comm: "curl", Outbound: true,
+	}
+	if got := outbound.Canonical(); got != outbound {
+		t.Fatalf("Canonical() on outbound event changed it: got %+v, want unchanged %+v", got, outbound)
+	}
+
+	inbound := ConnectionEvent{
+		SrcIP: netip.MustParseAddr("10.0.0.2"), SrcPort: 8080,
+		DstIP: netip.MustParseAddr("10.0.0.1"), DstPort: 54321,
+		Outbound: false,
+	}
+	got := inbound.Canonical()
+	want := ConnectionEvent{
+		SrcIP: netip.MustParseAddr("10.0.0.1"), SrcPort: 54321,
+		DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 8080,
+		Outbound: false,
+	}
+	if got != want {
+		t.Fatalf("Canonical() on inbound event = %+v, want %+v", got, want)
+	}
+}
+
+func TestConnectionEventIsReversedDuplicate(t *testing.T) {
 	tests := []struct {
-		name string
-		port uint16
-		want bool
+		name     string
+		outbound bool
+		source   Workload
+		want     bool
 	}{
-		{"http service", 80, false},
-		{"https service", 443, false},
-		{"postgres", 5432, false},
-		{"high service port", 8080, false},
-		{"nodeport top", 32767, false},
-		{"ephemeral min", 32768, true},
-		{"ephemeral mid", 45000, true},
-		{"ephemeral max", 60999, true},
-		{"zero port", 0, false},
+		{"inbound record, in-cluster source -> reversed duplicate", false, Workload{Kind: "Deployment"}, true},
+		{"inbound record, node source -> reversed duplicate", false, Workload{Kind: KindNode}, true},
+		{"inbound record, external source -> kept", false, Workload{Kind: KindExternal}, false},
+		{"outbound record, in-cluster source -> kept", true, Workload{Kind: "Deployment"}, false},
+		{"outbound record, external source -> kept", true, Workload{Kind: KindExternal}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ev := ConnectionEvent{DstPort: tt.port}
-			if got := ev.HasEphemeralDestPort(); got != tt.want {
-				t.Fatalf("HasEphemeralDestPort() DstPort=%d = %v, want %v", tt.port, got, tt.want)
+			ev := ConnectionEvent{Outbound: tt.outbound}
+			if got := ev.IsReversedDuplicate(tt.source); got != tt.want {
+				t.Fatalf("IsReversedDuplicate() = %v, want %v", got, tt.want)
 			}
 		})
 	}
