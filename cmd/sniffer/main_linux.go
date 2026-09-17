@@ -75,13 +75,14 @@ func run(logger *slog.Logger, configPath string) error {
 	if err != nil {
 		return err
 	}
-	ctrl := resolver.NewController(cs)
+	ctrl := resolver.NewController(cs, logger)
 	go func() {
 		if err := ctrl.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("resolver stopped", slog.Any("err", err))
 			stop()
 		}
 	}()
+	ctrl.WaitForSync()
 
 	// Optional Istio ServiceEntry resolver: maps ServiceEntry VIPs (incl. the
 	// auto-allocated 240.240.0.0/16 addresses) to their external host. Off

@@ -3,10 +3,14 @@
 package resolver
 
 import (
+	"context"
+	"errors"
 	"net/netip"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -33,6 +37,8 @@ func seed(t *testing.T, c *Controller, objs ...any) {
 			err = podIdx.Add(o)
 		case *appsv1.ReplicaSet:
 			err = rsIdx.Add(o)
+		case *batchv1.Job:
+			err = c.factory.Batch().V1().Jobs().Informer().GetIndexer().Add(o)
 		case *corev1.Node:
 			err = c.factory.Core().V1().Nodes().Informer().GetIndexer().Add(o)
 		default:
@@ -45,7 +51,7 @@ func seed(t *testing.T, c *Controller, objs ...any) {
 }
 
 func TestControllerResolvesPodToDeployment(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 
 	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
 		Name: "api-7d8f9", Namespace: "shop",
@@ -75,7 +81,7 @@ func TestControllerResolvesPodToDeployment(t *testing.T) {
 // A pod controlled directly by a StatefulSet (no ReplicaSet layer) resolves to
 // the StatefulSet.
 func TestControllerResolvesDirectController(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "db-0", Namespace: "data",
@@ -93,7 +99,7 @@ func TestControllerResolvesDirectController(t *testing.T) {
 }
 
 func TestControllerPodDelete(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "api-0", Namespace: "shop",
@@ -115,7 +121,7 @@ func TestControllerPodDelete(t *testing.T) {
 
 // onPodDelete must handle the tombstone wrapper delivered on missed deletes.
 func TestControllerPodDeleteTombstone(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns",
 			OwnerReferences: []metav1.OwnerReference{ctrlRef("StatefulSet", "s")}},
@@ -133,7 +139,7 @@ func TestControllerPodDeleteTombstone(t *testing.T) {
 
 // A pod without an assigned IP must be ignored (not scheduled yet).
 func TestControllerPodNoIP(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "ns"}}
 	seed(t, c, pod)
 	c.onPod(pod)
@@ -146,7 +152,7 @@ func TestControllerPodNoIP(t *testing.T) {
 // attribute all node-host traffic to a single workload (phantom dest edges).
 // They must be skipped.
 func TestControllerSkipsHostNetworkPod(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "network-sniffer-abcde", Namespace: "canary-prober",
@@ -170,7 +176,7 @@ func TestControllerSkipsHostNetworkPod(t *testing.T) {
 // This gives host-network source traffic (node-exporter, kube-proxy, the
 // sniffer itself) a stable identity instead of a bare IP.
 func TestControllerResolvesNodeInternalIP(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "ip-100-90-106-4.eu-central-1.compute.internal"},
 		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
@@ -193,7 +199,7 @@ func TestControllerResolvesNodeInternalIP(t *testing.T) {
 // External and DNS node addresses must not be indexed; only InternalIP is a
 // valid in-cluster source address.
 func TestControllerNodeIgnoresNonInternalIP(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
 		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
@@ -214,7 +220,7 @@ func TestControllerNodeIgnoresNonInternalIP(t *testing.T) {
 }
 
 func TestControllerNodeDualStackIPs(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-ds"},
 		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
@@ -234,7 +240,7 @@ func TestControllerNodeDualStackIPs(t *testing.T) {
 }
 
 func TestControllerNodeDelete(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-x"},
 		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
@@ -255,7 +261,7 @@ func TestControllerNodeDelete(t *testing.T) {
 
 // onNodeDelete must handle the tombstone wrapper delivered on missed deletes.
 func TestControllerNodeDeleteTombstone(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-t"},
 		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
@@ -276,7 +282,7 @@ func TestControllerNodeDeleteTombstone(t *testing.T) {
 // deliberately not indexed — so PID-based source resolution can attribute their
 // traffic to the exact workload.
 func TestControllerIndexesPodByUID(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "api-0", Namespace: "shop", UID: "3f8e3c4d-1a2b-4c5d-8e9f-0a1b2c3d4e5f",
@@ -297,7 +303,7 @@ func TestControllerIndexesPodByUID(t *testing.T) {
 }
 
 func TestControllerIndexesHostNetworkPodByUID(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node-exporter-x", Namespace: "monitoring", UID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -321,7 +327,7 @@ func TestControllerIndexesHostNetworkPodByUID(t *testing.T) {
 }
 
 func TestControllerPodDeleteRemovesUID(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "p", Namespace: "ns", UID: "11112222-3333-4444-5555-666677778888",
@@ -339,7 +345,7 @@ func TestControllerPodDeleteRemovesUID(t *testing.T) {
 }
 
 func TestControllerDualStackIPs(t *testing.T) {
-	c := NewController(fake.NewSimpleClientset())
+	c := NewController(fake.NewSimpleClientset(), nil)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "ds", Namespace: "ns",
 			OwnerReferences: []metav1.OwnerReference{ctrlRef("DaemonSet", "ds")}},
@@ -353,5 +359,85 @@ func TestControllerDualStackIPs(t *testing.T) {
 	}
 	if _, ok := c.cache.LookupIP(netip.MustParseAddr("fd00::1")); !ok {
 		t.Error("v6 pod IP not cached")
+	}
+}
+
+// A pod owned by a Job that is itself owned by a CronJob resolves to the
+// CronJob, not the Job's hash-suffixed intermediate name.
+func TestControllerResolvesPodToCronJob(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset(), nil)
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "backup-28901234", Namespace: "ops",
+		OwnerReferences: []metav1.OwnerReference{ctrlRef("CronJob", "backup")},
+	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "backup-28901234-xk2p9", Namespace: "ops",
+			OwnerReferences: []metav1.OwnerReference{ctrlRef("Job", "backup-28901234")},
+		},
+		Status: corev1.PodStatus{PodIP: "10.4.4.4"},
+	}
+	seed(t, c, job, pod)
+	c.onPod(pod)
+
+	got, ok := c.cache.LookupIP(netip.MustParseAddr("10.4.4.4"))
+	if !ok {
+		t.Fatal("pod IP not resolved into cache")
+	}
+	want := model.Workload{Name: "backup", Namespace: "ops", Kind: "CronJob"}
+	if got != want {
+		t.Fatalf("resolved workload = %+v, want %+v", got, want)
+	}
+}
+
+// A Job with no controlling owner is itself top-level (a standalone Job, not a
+// CronJob run), so the walk stops at it.
+func TestControllerResolvesStandaloneJob(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset(), nil)
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "migrate", Namespace: "ops"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "migrate-abcde", Namespace: "ops",
+			OwnerReferences: []metav1.OwnerReference{ctrlRef("Job", "migrate")},
+		},
+		Status: corev1.PodStatus{PodIP: "10.4.4.5"},
+	}
+	seed(t, c, job, pod)
+	c.onPod(pod)
+
+	got, _ := c.cache.LookupIP(netip.MustParseAddr("10.4.4.5"))
+	want := model.Workload{Name: "migrate", Namespace: "ops", Kind: "Job"}
+	if got != want {
+		t.Fatalf("resolved workload = %+v, want %+v", got, want)
+	}
+}
+
+// Run's two-phase startup must complete (RS/Job informers synced, then
+// Pod/Node/Service/EndpointSlice informers synced) before WaitForSync
+// unblocks, so callers never process eBPF events against a half-synced
+// resolver.
+func TestControllerWaitForSyncUnblocksAfterRun(t *testing.T) {
+	c := NewController(fake.NewSimpleClientset(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+
+	synced := make(chan struct{})
+	go func() {
+		c.WaitForSync()
+		close(synced)
+	}()
+
+	select {
+	case <-synced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitForSync did not unblock within timeout")
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned unexpected error: %v", err)
 	}
 }

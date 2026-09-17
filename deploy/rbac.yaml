@@ -21,6 +21,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]
+  # Walk Pod -> Job -> CronJob ownership so CronJob-owned pods resolve to the
+  # CronJob name instead of the Job's hash-suffixed intermediate name.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
   # Map ClusterIP:port to the L7 (application) protocol declared by the Service
   # port (appProtocol field or Istio name convention), so edges report http/grpc
   # instead of bare tcp.

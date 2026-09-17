@@ -5,6 +5,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
+	batchlisters "k8s.io/client-go/listers/batch/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
@@ -29,15 +31,20 @@ const resyncPeriod = 10 * time.Minute
 // to a Node identity so host-network and node-level traffic resolves to the
 // node name instead of a bare IP.
 type Controller struct {
-	cache   *Cache
-	factory informers.SharedInformerFactory
-	pods    corelisters.PodLister
-	lookup  OwnerLookup
+	cache      *Cache
+	factory    informers.SharedInformerFactory
+	pods       corelisters.PodLister
+	lookup     OwnerLookup
+	logger     *slog.Logger
+	syncedChan chan struct{} // closed once every informer has completed its initial sync
 }
 
 // NewController builds a Controller backed by the given clientset. Call Run to
-// start it and Cache to read resolved workloads.
-func NewController(cs kubernetes.Interface) *Controller {
+// start it and Cache to read resolved workloads. logger is optional (nil
+// disables logging) and is used to surface owner-lookup misses that would
+// otherwise silently leak an intermediate (hash-suffixed) name as a workload
+// identity.
+func NewController(cs kubernetes.Interface, logger *slog.Logger) *Controller {
 	// WithTransform trims every watched object to the fields this resolver reads
 	// (see trimObject) before it enters the informer store. On a large cluster
 	// each DaemonSet pod would otherwise cache full Pod/Service/EndpointSlice
@@ -47,28 +54,74 @@ func NewController(cs kubernetes.Interface) *Controller {
 		informers.WithTransform(trimObject))
 	pods := factory.Core().V1().Pods().Lister()
 	rs := factory.Apps().V1().ReplicaSets().Lister()
+	jobs := factory.Batch().V1().Jobs().Lister()
 
 	return &Controller{
-		cache:   NewCache(),
-		factory: factory,
-		pods:    pods,
-		lookup:  &listerOwnerLookup{pods: pods, rs: rs},
+		cache:      NewCache(),
+		factory:    factory,
+		pods:       pods,
+		lookup:     &listerOwnerLookup{pods: pods, rs: rs, jobs: jobs, logger: logger},
+		logger:     logger,
+		syncedChan: make(chan struct{}),
 	}
 }
 
 // Cache returns the IP->Workload store this controller maintains.
 func (c *Controller) Cache() *Cache { return c.cache }
 
+// WaitForSync blocks until every informer has completed its initial sync.
+// Call this before processing eBPF events so the resolver never attributes a
+// pod to an intermediate ReplicaSet/Job name because its owning Deployment or
+// CronJob hadn't synced yet.
+func (c *Controller) WaitForSync() {
+	<-c.syncedChan
+}
+
 // Run starts the informers and blocks until ctx is cancelled. It returns an
 // error if the caches fail to sync.
+//
+// Informers start in two phases to close a sync-order race: ownership
+// informers (ReplicaSet, Job) sync first, then Pod/Node/Service/EndpointSlice
+// sync second. Without this ordering, a Pod add event can fire before the
+// ReplicaSet/Job cache is populated, so ResolveTopOwner returns the
+// intermediate ReplicaSet/Job name instead of the top-level
+// Deployment/CronJob. StatefulSet and DaemonSet need no informer: they are
+// top-level workloads, and ResolveTopOwner stops at them from ownerReferences
+// alone.
 func (c *Controller) Run(ctx context.Context) error {
 	podInformer := c.factory.Core().V1().Pods().Informer()
 	nodeInformer := c.factory.Core().V1().Nodes().Informer()
 	svcInformer := c.factory.Core().V1().Services().Informer()
 	epInformer := c.factory.Discovery().V1().EndpointSlices().Informer()
-	// Realise the ReplicaSet informer so its lister is populated.
-	_ = c.factory.Apps().V1().ReplicaSets().Informer()
+	rsInformer := c.factory.Apps().V1().ReplicaSets().Informer()
+	jobInformer := c.factory.Batch().V1().Jobs().Informer()
 
+	// Phase 1: register no-op handlers on the ownership informers — they are
+	// read only via lister during the owner-chain walk, never reacted to — and
+	// sync them before any Pod event can be processed.
+	if _, err := rsInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) {},
+		UpdateFunc: func(any, any) {},
+		DeleteFunc: func(any) {},
+	}); err != nil {
+		return fmt.Errorf("add replicaset event handler: %w", err)
+	}
+	if _, err := jobInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) {},
+		UpdateFunc: func(any, any) {},
+		DeleteFunc: func(any) {},
+	}); err != nil {
+		return fmt.Errorf("add job event handler: %w", err)
+	}
+
+	go rsInformer.Run(ctx.Done())
+	go jobInformer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), rsInformer.HasSynced, jobInformer.HasSynced) {
+		return fmt.Errorf("replicaset/job informers failed to sync")
+	}
+
+	// Phase 2: ownership data is ready, so Pod add events now always resolve to
+	// the correct top-level workload.
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { c.onPod(obj) },
 		UpdateFunc: func(_, obj any) { c.onPod(obj) },
@@ -105,12 +158,17 @@ func (c *Controller) Run(ctx context.Context) error {
 		return fmt.Errorf("add endpointslice event handler: %w", err)
 	}
 
-	c.factory.Start(ctx.Done())
-	for typ, ok := range c.factory.WaitForCacheSync(ctx.Done()) {
-		if !ok {
-			return fmt.Errorf("informer cache for %v failed to sync", typ)
-		}
+	go podInformer.Run(ctx.Done())
+	go nodeInformer.Run(ctx.Done())
+	go svcInformer.Run(ctx.Done())
+	go epInformer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(),
+		podInformer.HasSynced, nodeInformer.HasSynced, svcInformer.HasSynced, epInformer.HasSynced,
+	) {
+		return fmt.Errorf("pod/node/service/endpointslice informers failed to sync")
 	}
+
+	close(c.syncedChan)
 
 	<-ctx.Done()
 	return ctx.Err()
@@ -241,11 +299,33 @@ func podIPs(pod *corev1.Pod) []netip.Addr {
 }
 
 // listerOwnerLookup resolves controllers from informer listers, implementing
-// OwnerLookup so the pure ResolveTopOwner walk can climb Pod -> ReplicaSet ->
-// Deployment/Rollout. Kinds beyond Pod/ReplicaSet are treated as top-level.
+// OwnerLookup so the pure ResolveTopOwner walk can climb ownership chains:
+//   - Pod -> ReplicaSet -> Deployment/Rollout (ReplicaSet is intermediate)
+//   - Pod -> Job -> CronJob (Job is intermediate)
+//   - Pod -> StatefulSet / DaemonSet (top-level, no intermediate)
+//
+// Only intermediate kinds (ReplicaSet, Job) need cases in GetController;
+// top-level kinds fall through to the default case.
 type listerOwnerLookup struct {
-	pods corelisters.PodLister
-	rs   appslisters.ReplicaSetLister
+	pods   corelisters.PodLister
+	rs     appslisters.ReplicaSetLister
+	jobs   batchlisters.JobLister
+	logger *slog.Logger // optional; nil disables logging
+}
+
+// logMiss reports a failed owner lookup: the walk stops early and the
+// intermediate (hash-suffixed) name leaks out as the workload identity, so the
+// miss must be observable rather than silent. Rare: Run awaits ownership
+// informer sync before pods are processed, so misses mean a deleted owner or
+// a genuine cache gap.
+func (l *listerOwnerLookup) logMiss(kind, namespace, name string, err error) {
+	if l.logger != nil {
+		l.logger.Warn("owner lookup failed, resolving to intermediate identity",
+			slog.String("kind", kind),
+			slog.String("namespace", namespace),
+			slog.String("name", name),
+			slog.Any("err", err))
+	}
 }
 
 func (l *listerOwnerLookup) GetController(kind, namespace, name string) (string, string, bool) {
@@ -253,15 +333,24 @@ func (l *listerOwnerLookup) GetController(kind, namespace, name string) (string,
 	case "Pod":
 		pod, err := l.pods.Pods(namespace).Get(name)
 		if err != nil {
+			l.logMiss(kind, namespace, name, err)
 			return "", "", false
 		}
 		return controllerOf(pod.GetOwnerReferences())
 	case "ReplicaSet":
 		set, err := l.rs.ReplicaSets(namespace).Get(name)
 		if err != nil {
+			l.logMiss(kind, namespace, name, err)
 			return "", "", false
 		}
 		return controllerOf(set.GetOwnerReferences())
+	case "Job":
+		job, err := l.jobs.Jobs(namespace).Get(name)
+		if err != nil {
+			l.logMiss(kind, namespace, name, err)
+			return "", "", false
+		}
+		return controllerOf(job.GetOwnerReferences())
 	default:
 		return "", "", false
 	}
