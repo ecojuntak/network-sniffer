@@ -1,0 +1,14 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+# Every kind node is a container on the same podman VM, so they share one
+# kernel. tracefs is not mounted inside the node containers by default; the
+# collector attaches its tracepoint through it.
+nodes:
+  - role: control-plane
+    extraMounts: &tracefs
+      - hostPath: /sys/kernel/tracing
+        containerPath: /sys/kernel/tracing
+  - role: worker
+    extraMounts: *tracefs
+  - role: worker
+    extraMounts: *tracefs
