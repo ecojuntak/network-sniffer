@@ -100,54 +100,66 @@ func derefString(s *string) string {
 	return *s
 }
 
-// clusterIPEntry maps a Service's ClusterIP to a backing pod IP. When a
-// connection targets the ClusterIP (pre-DNAT, before kube-proxy/eBPF rewrites
-// it to a pod IP), this lets the resolver redirect the lookup: ClusterIP ->
-// pod IP -> workload, through the existing pod-IP cache lookup.
-type clusterIPEntry struct {
-	clusterIP netip.Addr
-	podIP     netip.Addr
-}
-
-// endpointSliceClusterIPEntries builds ClusterIP -> pod IP mappings for a
-// Service's ClusterIP addresses, one entry per ClusterIP, all pointing at the
-// first valid pod IP found in the EndpointSlice's endpoints. Returns nil for a
-// headless Service (no ClusterIP) or an EndpointSlice with no backing pod IP.
+// serviceWorkload derives the identity a Service's ClusterIP resolves to, so
+// connections that target the ClusterIP (pre-DNAT, before kube-proxy/eBPF
+// rewrites it to a pod IP) still name their destination. It looks up every
+// endpoint address across all of the Service's EndpointSlices in store and
+// collects the distinct workloads behind them:
+//   - none known: ok=false, the ClusterIP stays unmapped
+//   - exactly one: that workload
+//   - more than one (e.g. stable + canary Deployments): a KindService identity
+//     named after the Service, since no single workload owns the ClusterIP
 //
-// Mapping to a pod IP rather than directly to a Workload avoids any
-// dependency on the pod already being in the cache at index time: the pod IP
-// is resolved to its workload through the normal pod-IP cache lookup whenever
-// the ClusterIP is looked up.
-func endpointSliceClusterIPEntries(es *discoveryv1.EndpointSlice, svc *corev1.Service) []clusterIPEntry {
-	if es == nil || svc == nil {
-		return nil
+// Only pod-owned workloads count; node, external and other non-pod identities
+// a lookup may return are ignored. The workload is copied at index time, so
+// callers must re-run this whenever the Service or its slices change.
+func serviceWorkload(svc *corev1.Service, slices []*discoveryv1.EndpointSlice, store Store) (model.Workload, bool) {
+	if svc == nil {
+		return model.Workload{}, false
 	}
-	ips := clusterIPs(svc)
-	if len(ips) == 0 {
-		return nil
-	}
-
-	var podIP netip.Addr
-	var found bool
-	for _, ep := range es.Endpoints {
-		for _, addr := range ep.Addresses {
-			if ip, err := netip.ParseAddr(addr); err == nil {
-				podIP = ip
-				found = true
-				break
+	var (
+		first    model.Workload
+		found    bool
+		multiple bool
+	)
+	for _, es := range slices {
+		if es == nil {
+			continue
+		}
+		for _, ep := range es.Endpoints {
+			for _, addr := range ep.Addresses {
+				ip, err := netip.ParseAddr(addr)
+				if err != nil {
+					continue
+				}
+				wl, ok := store.LookupIP(ip)
+				if !ok || !isPodWorkload(wl) {
+					continue
+				}
+				if !found {
+					first, found = wl, true
+				} else if wl != first {
+					multiple = true
+				}
 			}
 		}
-		if found {
-			break
-		}
 	}
-	if !found {
-		return nil
+	switch {
+	case !found:
+		return model.Workload{}, false
+	case multiple:
+		return model.Workload{Name: svc.Name, Namespace: svc.Namespace, Kind: model.KindService}, true
+	default:
+		return first, true
 	}
+}
 
-	out := make([]clusterIPEntry, 0, len(ips))
-	for _, ip := range ips {
-		out = append(out, clusterIPEntry{clusterIP: ip, podIP: podIP})
+// isPodWorkload reports whether w is a pod-owned workload, as opposed to a
+// node, external, Service or ServiceEntry identity sharing the IP cache.
+func isPodWorkload(w model.Workload) bool {
+	switch w.Kind {
+	case model.KindExternal, model.KindNode, model.KindService, model.KindServiceEntry:
+		return false
 	}
-	return out
+	return true
 }

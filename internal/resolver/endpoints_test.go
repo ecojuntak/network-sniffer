@@ -8,6 +8,8 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+
+	"github.com/ecojuntak/network-sniffer/internal/model"
 )
 
 func findEntry(entries []portEntry, ip string, port uint16) (portEntry, bool) {
@@ -102,114 +104,62 @@ func TestParseEntriesNilSafe(t *testing.T) {
 	}
 }
 
-func TestEndpointSliceClusterIPEntries(t *testing.T) {
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop"},
-		Spec: corev1.ServiceSpec{
-			ClusterIP:  "172.20.0.10",
-			ClusterIPs: []string{"172.20.0.10"},
-			Ports:      []corev1.ServicePort{{Name: "grpc", Port: 8080}},
-		},
-	}
-	es := &discoveryv1.EndpointSlice{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "checkout-abc", Namespace: "shop",
-			Labels: map[string]string{"kubernetes.io/service-name": "checkout"},
-		},
-		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.1.5", "10.0.1.6"}}},
+// fakeStore is a map-backed Store for exercising serviceWorkload without a
+// Controller.
+type fakeStore map[string]model.Workload
+
+func (f fakeStore) LookupIP(ip netip.Addr) (model.Workload, bool) {
+	w, ok := f[ip.String()]
+	return w, ok
+}
+
+func slice(addrs ...string) *discoveryv1.EndpointSlice {
+	return &discoveryv1.EndpointSlice{Endpoints: []discoveryv1.Endpoint{{Addresses: addrs}}}
+}
+
+func TestServiceWorkload(t *testing.T) {
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop"}}
+	stable := model.Workload{Name: "checkout", Namespace: "shop", Kind: "Deployment"}
+	canary := model.Workload{Name: "checkout-canary", Namespace: "shop", Kind: "Deployment"}
+	store := fakeStore{
+		"10.0.1.5":    stable,
+		"10.0.1.6":    stable,
+		"10.0.1.7":    canary,
+		"10.0.9.1":    {Name: "ip-10-0-9-1", Kind: model.KindNode},
+		"10.0.9.2":    {Name: "10.0.9.2", Kind: model.KindExternal},
+		"240.240.0.1": {Name: "db.example.com", Kind: model.KindServiceEntry},
 	}
 
-	entries := endpointSliceClusterIPEntries(es, svc)
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
+	tests := []struct {
+		name   string
+		slices []*discoveryv1.EndpointSlice
+		want   model.Workload
+		wantOK bool
+	}{
+		{"single workload across slices", []*discoveryv1.EndpointSlice{slice("10.0.1.5"), slice("10.0.1.6")}, stable, true},
+		{"two workloads -> Service identity", []*discoveryv1.EndpointSlice{slice("10.0.1.5"), slice("10.0.1.7")},
+			model.Workload{Name: "checkout", Namespace: "shop", Kind: model.KindService}, true},
+		{"two workloads in one slice", []*discoveryv1.EndpointSlice{slice("10.0.1.5", "10.0.1.7")},
+			model.Workload{Name: "checkout", Namespace: "shop", Kind: model.KindService}, true},
+		{"unknown pod IPs", []*discoveryv1.EndpointSlice{slice("10.0.7.7")}, model.Workload{}, false},
+		{"no slices", nil, model.Workload{}, false},
+		{"empty slice", []*discoveryv1.EndpointSlice{slice()}, model.Workload{}, false},
+		{"non-pod identities ignored", []*discoveryv1.EndpointSlice{slice("10.0.9.1", "10.0.9.2", "240.240.0.1", "10.0.1.5")}, stable, true},
+		{"unparseable address skipped", []*discoveryv1.EndpointSlice{slice("bogus", "10.0.1.5")}, stable, true},
+		{"nil slice skipped", []*discoveryv1.EndpointSlice{nil, slice("10.0.1.5")}, stable, true},
 	}
-	if entries[0].clusterIP.String() != "172.20.0.10" {
-		t.Errorf("got clusterIP %s, want 172.20.0.10", entries[0].clusterIP)
-	}
-	if entries[0].podIP.String() != "10.0.1.5" {
-		t.Errorf("got podIP %s, want 10.0.1.5 (first valid pod IP)", entries[0].podIP)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := serviceWorkload(svc, tt.slices, store)
+			if ok != tt.wantOK || got != tt.want {
+				t.Errorf("serviceWorkload = (%+v, %v), want (%+v, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }
 
-// A headless Service (no ClusterIP) produces no ClusterIP entries; its pods
-// are still covered via the port-index path (endpointSliceEntries).
-func TestEndpointSliceClusterIPEntriesHeadless(t *testing.T) {
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "headless", Namespace: "default"},
-		Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
-	}
-	es := &discoveryv1.EndpointSlice{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "headless-abc", Namespace: "default",
-			Labels: map[string]string{"kubernetes.io/service-name": "headless"},
-		},
-		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.1.5"}}},
-	}
-	if entries := endpointSliceClusterIPEntries(es, svc); entries != nil {
-		t.Errorf("headless service should produce no ClusterIP entries, got %d", len(entries))
-	}
-}
-
-// No backing pod IPs (e.g. an EndpointSlice with an empty address list) means
-// there is nothing to redirect the ClusterIP to.
-func TestEndpointSliceClusterIPEntriesNoPods(t *testing.T) {
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "default"},
-		Spec:       corev1.ServiceSpec{ClusterIP: "172.20.0.20", ClusterIPs: []string{"172.20.0.20"}},
-	}
-	es := &discoveryv1.EndpointSlice{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "empty-abc", Namespace: "default",
-			Labels: map[string]string{"kubernetes.io/service-name": "empty"},
-		},
-		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{}}},
-	}
-	if entries := endpointSliceClusterIPEntries(es, svc); entries != nil {
-		t.Errorf("service with no pod IPs should produce no entries, got %d", len(entries))
-	}
-}
-
-// A dual-stack Service produces one entry per ClusterIP, all pointing at the
-// same backing pod IP.
-func TestEndpointSliceClusterIPEntriesMultipleClusterIPs(t *testing.T) {
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "dual-stack", Namespace: "default"},
-		Spec: corev1.ServiceSpec{
-			ClusterIP:  "172.20.0.30",
-			ClusterIPs: []string{"172.20.0.30", "fd00::1234"},
-		},
-	}
-	es := &discoveryv1.EndpointSlice{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "dual-stack-abc", Namespace: "default",
-			Labels: map[string]string{"kubernetes.io/service-name": "dual-stack"},
-		},
-		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.1.10"}}},
-	}
-
-	entries := endpointSliceClusterIPEntries(es, svc)
-	if len(entries) != 2 {
-		t.Fatalf("dual-stack service should produce 2 entries, got %d", len(entries))
-	}
-	seen := make(map[string]bool)
-	for _, e := range entries {
-		seen[e.clusterIP.String()] = true
-		if e.podIP.String() != "10.0.1.10" {
-			t.Errorf("got podIP %s, want 10.0.1.10", e.podIP)
-		}
-	}
-	if !seen["172.20.0.30"] || !seen["fd00::1234"] {
-		t.Errorf("missing a ClusterIP entry, got %v", seen)
-	}
-}
-
-func TestEndpointSliceClusterIPEntriesNilSafe(t *testing.T) {
-	svc := &corev1.Service{Spec: corev1.ServiceSpec{ClusterIP: "172.20.0.1"}}
-	es := &discoveryv1.EndpointSlice{}
-	if endpointSliceClusterIPEntries(nil, svc) != nil {
-		t.Error("nil EndpointSlice should return nil")
-	}
-	if endpointSliceClusterIPEntries(es, nil) != nil {
-		t.Error("nil Service should return nil")
+func TestServiceWorkloadNilService(t *testing.T) {
+	if _, ok := serviceWorkload(nil, []*discoveryv1.EndpointSlice{slice("10.0.1.5")}, fakeStore{}); ok {
+		t.Error("nil Service should resolve to nothing")
 	}
 }

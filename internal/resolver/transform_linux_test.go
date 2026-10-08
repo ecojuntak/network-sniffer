@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -167,6 +168,48 @@ func TestTrimEndpointSliceKeepsPortsAndAddresses(t *testing.T) {
 	}
 	if got.Endpoints[0].NodeName != nil || got.Endpoints[0].TargetRef != nil {
 		t.Error("endpoint metadata not stripped")
+	}
+	assertStripped(t, got.ObjectMeta)
+}
+
+// The service-name label must survive trimming: without it a slice cannot be
+// tied to its Service and ClusterIP mapping silently never happens.
+func TestTrimEndpointSliceKeepsServiceNameLabel(t *testing.T) {
+	meta := bloat()
+	meta.Namespace, meta.Name = "ns", "svc-abc"
+	meta.Labels[endpointSliceServiceNameLabel] = "svc"
+	out, err := trimObject(&discoveryv1.EndpointSlice{ObjectMeta: meta})
+	if err != nil {
+		t.Fatalf("trimObject: %v", err)
+	}
+	got := out.(*discoveryv1.EndpointSlice)
+	want := map[string]string{endpointSliceServiceNameLabel: "svc"}
+	if len(got.Labels) != 1 || got.Labels[endpointSliceServiceNameLabel] != "svc" {
+		t.Errorf("labels = %v, want %v", got.Labels, want)
+	}
+	if got.Annotations != nil || got.ManagedFields != nil || got.Finalizers != nil {
+		t.Errorf("heavy metadata not stripped: %+v", got.ObjectMeta)
+	}
+}
+
+func TestTrimJobKeepsOwnerRefs(t *testing.T) {
+	meta := bloat()
+	meta.Namespace, meta.Name = "ns", "backup-123"
+	meta.OwnerReferences = []metav1.OwnerReference{ctrlRef("CronJob", "backup")}
+
+	out, err := trimObject(&batchv1.Job{
+		ObjectMeta: meta,
+		Spec:       batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}},
+	})
+	if err != nil {
+		t.Fatalf("trimObject: %v", err)
+	}
+	got := out.(*batchv1.Job)
+	if got.Name != "backup-123" || len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != "backup" {
+		t.Errorf("owner chain lost: %+v", got.ObjectMeta)
+	}
+	if len(got.Spec.Template.Spec.Containers) != 0 {
+		t.Error("template not stripped")
 	}
 	assertStripped(t, got.ObjectMeta)
 }

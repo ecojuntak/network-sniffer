@@ -210,6 +210,13 @@ const KindExternal = "external"
 // giving external dependencies a stable name instead of a bare IP.
 const KindServiceEntry = "ServiceEntry"
 
+// KindService marks a peer resolved to a Kubernetes Service by its ClusterIP
+// when the Service's endpoints span more than one workload (e.g. a stable and
+// a canary Deployment behind one Service). No single workload owns such a
+// ClusterIP, so the Service itself is the honest identity. A ClusterIP backed
+// by exactly one workload resolves to that workload instead.
+const KindService = "Service"
+
 // KindNode marks a peer resolved to a cluster Node by its InternalIP rather
 // than to a pod-owned workload. Host-network processes (node-exporter,
 // kube-proxy, CNI agents, the sniffer itself) and node-level daemons source

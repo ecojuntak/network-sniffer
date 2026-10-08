@@ -4,6 +4,7 @@ package resolver
 
 import (
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,7 +15,7 @@ import (
 // only the fields this resolver reads before it is stored in the shared cache.
 //
 // On a large cluster each DaemonSet pod holds a full in-memory copy of every
-// Pod/Node/Service/EndpointSlice/ReplicaSet. The bulk of that footprint is data
+// Pod/Node/Service/EndpointSlice/ReplicaSet/Job. The bulk of that footprint is data
 // this program never touches: managedFields (often 30-50% of an object),
 // annotations, labels, env, container specs, conditions, volumes. Stripping it
 // at ingestion cuts informer memory by roughly an order of magnitude without
@@ -23,9 +24,11 @@ import (
 // Every returned object keeps exactly the fields consumed elsewhere:
 //   - Pod: namespace/name/UID + ownerRefs (owner walk), hostNetwork, pod IPs
 //   - ReplicaSet: namespace/name + ownerRefs (owner walk continuation)
+//   - Job: namespace/name + ownerRefs (owner walk continuation to CronJob)
 //   - Node: name + addresses (InternalIP indexing)
 //   - Service: namespace/name + ClusterIP(s) + ports (L7 port index)
-//   - EndpointSlice: namespace/name + ports + endpoint addresses (L7 port index)
+//   - EndpointSlice: namespace/name + kubernetes.io/service-name label (ties the
+//     slice to its Service for ClusterIP mapping) + ports + endpoint addresses
 //
 // Tombstone (cache.DeletedFinalStateUnknown) values are passed through: the
 // delete handlers unwrap them, and their inner object was already trimmed on the
@@ -53,6 +56,15 @@ func trimObject(obj any) (any, error) {
 			},
 		}, nil
 
+	case *batchv1.Job:
+		return &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:       o.Namespace,
+				Name:            o.Name,
+				OwnerReferences: o.OwnerReferences,
+			},
+		}, nil
+
 	case *corev1.Node:
 		return &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: o.Name},
@@ -71,13 +83,28 @@ func trimObject(obj any) (any, error) {
 
 	case *discoveryv1.EndpointSlice:
 		return &discoveryv1.EndpointSlice{
-			ObjectMeta: metav1.ObjectMeta{Namespace: o.Namespace, Name: o.Name},
-			Ports:      o.Ports,
-			Endpoints:  trimEndpoints(o.Endpoints),
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: o.Namespace,
+				Name:      o.Name,
+				Labels:    trimSliceLabels(o.Labels),
+			},
+			Ports:     o.Ports,
+			Endpoints: trimEndpoints(o.Endpoints),
 		}, nil
 	}
 
 	return obj, nil
+}
+
+// trimSliceLabels keeps only the kubernetes.io/service-name label, which the
+// ClusterIP mapping needs both to find a slice's Service and to list a
+// Service's slices by label selector. Every other label is dropped.
+func trimSliceLabels(in map[string]string) map[string]string {
+	name, ok := in[endpointSliceServiceNameLabel]
+	if !ok {
+		return nil
+	}
+	return map[string]string{endpointSliceServiceNameLabel: name}
 }
 
 // trimEndpoints keeps only the addresses of each endpoint — the sole field
