@@ -67,6 +67,13 @@ headers:
 generate: headers $(VMLINUX)
 	CGO_ENABLED=0 GOOS=linux $(GO) generate ./internal/bpf/...
 
+## proto: regenerate the collector <-> processor gRPC code (needs buf,
+## protoc-gen-go and protoc-gen-go-grpc on PATH). Output is committed.
+.PHONY: proto
+proto:
+	buf lint
+	buf generate
+
 ## build: build the linux sniffer binary (requires generate first).
 .PHONY: build
 build:
@@ -82,10 +89,20 @@ tidy:
 docker:
 	docker build -t $(IMAGE):$(TAG) .
 
-## deploy: apply the daemonset and RBAC to the current kube context.
+## deploy: apply the collector, processor and RBAC to the current kube context.
 .PHONY: deploy
 deploy:
-	kubectl apply -f deploy/
+	kubectl apply -k deploy/
+
+## e2e: end-to-end test on a kind cluster backed by podman (see test/e2e/README.md).
+.PHONY: e2e
+e2e:
+	test/e2e/run.sh
+
+## e2e-clean: delete the e2e kind cluster.
+.PHONY: e2e-clean
+e2e-clean:
+	KIND_EXPERIMENTAL_PROVIDER=podman CONTAINER_CONNECTION=kind-e2e-root kind delete cluster --name sniffer-e2e
 
 ## help: list targets.
 .PHONY: help

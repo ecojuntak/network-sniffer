@@ -55,22 +55,22 @@ func TestEnrichExternalDestination(t *testing.T) {
 	}
 }
 
-// fakePIDStore returns a fixed workload for a matching PID.
-type fakePIDStore struct {
-	pid uint32
+// fakeUIDStore returns a fixed workload for a matching pod UID.
+type fakeUIDStore struct {
+	uid string
 	wl  model.Workload
 }
 
-func (f fakePIDStore) LookupPID(pid uint32) (model.Workload, bool) {
-	if pid == f.pid {
+func (f fakeUIDStore) LookupUID(uid string) (model.Workload, bool) {
+	if uid == f.uid {
 		return f.wl, true
 	}
 	return model.Workload{}, false
 }
 
-// A host-network source resolves by IP only to the Node; the connecting PID
+// A host-network source resolves by IP only to the Node; the connecting pod UID
 // upgrades it to the exact owning pod workload.
-func TestEnrichPIDUpgradesNodeSource(t *testing.T) {
+func TestEnrichPodUIDUpgradesNodeSource(t *testing.T) {
 	c := resolver.NewCache()
 	nodeIP := netip.MustParseAddr("100.90.106.4")
 	dst := netip.MustParseAddr("10.0.0.2")
@@ -78,62 +78,62 @@ func TestEnrichPIDUpgradesNodeSource(t *testing.T) {
 	c.Upsert(dst, model.Workload{Name: "checkout", Namespace: "shop", Kind: "Rollout"})
 
 	pod := model.Workload{Name: "node-exporter", Namespace: "monitoring", Kind: "DaemonSet"}
-	pids := fakePIDStore{pid: 4242, wl: pod}
+	uids := fakeUIDStore{uid: "uid-4242", wl: pod}
 
-	ev := model.ConnectionEvent{SrcIP: nodeIP, DstIP: dst, DstPort: 9100, Protocol: model.ProtocolTCP, PID: 4242}
-	sc := Enrich(ev, c, pids, nil)
+	ev := model.ConnectionEvent{SrcIP: nodeIP, DstIP: dst, DstPort: 9100, Protocol: model.ProtocolTCP, SrcPodUID: "uid-4242"}
+	sc := Enrich(ev, c, uids, nil)
 
 	if sc.Source != pod {
 		t.Fatalf("source = %+v, want %+v", sc.Source, pod)
 	}
 }
 
-// An external source (unknown IP) is likewise upgraded when the PID resolves.
-func TestEnrichPIDUpgradesExternalSource(t *testing.T) {
+// An external source (unknown IP) is likewise upgraded when the pod UID resolves.
+func TestEnrichPodUIDUpgradesExternalSource(t *testing.T) {
 	c := resolver.NewCache()
 	pod := model.Workload{Name: "kube-proxy", Namespace: "kube-system", Kind: "DaemonSet"}
-	pids := fakePIDStore{pid: 10, wl: pod}
+	uids := fakeUIDStore{uid: "uid-10", wl: pod}
 
 	ev := model.ConnectionEvent{
-		SrcIP:    netip.MustParseAddr("100.64.1.1"),
-		DstIP:    netip.MustParseAddr("10.0.0.2"),
-		DstPort:  443,
-		Protocol: model.ProtocolTCP,
-		PID:      10,
+		SrcIP:     netip.MustParseAddr("100.64.1.1"),
+		DstIP:     netip.MustParseAddr("10.0.0.2"),
+		DstPort:   443,
+		Protocol:  model.ProtocolTCP,
+		SrcPodUID: "uid-10",
 	}
-	sc := Enrich(ev, c, pids, nil)
+	sc := Enrich(ev, c, uids, nil)
 	if sc.Source != pod {
 		t.Fatalf("source = %+v, want %+v", sc.Source, pod)
 	}
 }
 
-// A concrete pod-IP source must NOT be overridden by the PID path, even if the
-// PID store would return something (guards against stale/reused PIDs).
-func TestEnrichPIDDoesNotOverridePodIP(t *testing.T) {
+// A concrete pod-IP source must NOT be overridden by the UID path, even if the
+// UID store would return something (guards against stale UIDs).
+func TestEnrichPodUIDDoesNotOverridePodIP(t *testing.T) {
 	c := resolver.NewCache()
 	src := netip.MustParseAddr("10.0.0.1")
 	ipPod := model.Workload{Name: "frontend", Namespace: "shop", Kind: "Deployment"}
 	c.Upsert(src, ipPod)
 
-	pids := fakePIDStore{pid: 4242, wl: model.Workload{Name: "WRONG", Kind: "DaemonSet"}}
-	ev := model.ConnectionEvent{SrcIP: src, DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 80, Protocol: model.ProtocolTCP, PID: 4242}
-	sc := Enrich(ev, c, pids, nil)
+	uids := fakeUIDStore{uid: "uid-4242", wl: model.Workload{Name: "WRONG", Kind: "DaemonSet"}}
+	ev := model.ConnectionEvent{SrcIP: src, DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 80, Protocol: model.ProtocolTCP, SrcPodUID: "uid-4242"}
+	sc := Enrich(ev, c, uids, nil)
 
 	if sc.Source != ipPod {
-		t.Fatalf("source = %+v, want pod-IP result %+v (PID must not override)", sc.Source, ipPod)
+		t.Fatalf("source = %+v, want pod-IP result %+v (UID must not override)", sc.Source, ipPod)
 	}
 }
 
-// When the PID does not resolve, the Node identity from the IP index stands.
-func TestEnrichPIDMissKeepsNode(t *testing.T) {
+// When the pod UID does not resolve, the Node identity from the IP index stands.
+func TestEnrichPodUIDMissKeepsNode(t *testing.T) {
 	c := resolver.NewCache()
 	nodeIP := netip.MustParseAddr("100.90.106.4")
 	node := model.Workload{Name: "ip-100-90-106-4", Kind: model.KindNode}
 	c.Upsert(nodeIP, node)
 
-	pids := fakePIDStore{pid: 4242, wl: model.Workload{Name: "x"}}
-	ev := model.ConnectionEvent{SrcIP: nodeIP, DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 9100, Protocol: model.ProtocolTCP, PID: 999}
-	sc := Enrich(ev, c, pids, nil)
+	uids := fakeUIDStore{uid: "uid-4242", wl: model.Workload{Name: "x"}}
+	ev := model.ConnectionEvent{SrcIP: nodeIP, DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 9100, Protocol: model.ProtocolTCP, SrcPodUID: "uid-999"}
+	sc := Enrich(ev, c, uids, nil)
 
 	if sc.Source != node {
 		t.Fatalf("source = %+v, want node %+v", sc.Source, node)

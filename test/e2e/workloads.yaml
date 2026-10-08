@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: e2e
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo
+  template:
+    metadata:
+      labels:
+        app: echo
+    spec:
+      containers:
+        - name: echo
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          args: ["netexec", "--http-port=8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: e2e
+spec:
+  selector:
+    app: echo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      appProtocol: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caller
+  namespace: e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caller
+  template:
+    metadata:
+      labels:
+        app: caller
+    spec:
+      # Keep caller and echo on different nodes so the edge crosses nodes.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: echo
+      containers:
+        - name: caller
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - while true; do wget -q -O /dev/null http://echo.e2e.svc:8080/ || true; sleep 2; done

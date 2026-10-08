@@ -1,0 +1,43 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../deploy
+  - workloads.yaml
+images:
+  - name: ecojuntak/network-sniffer
+    newName: localhost/network-sniffer
+    newTag: e2e
+patches:
+  # The image is side-loaded into kind; never pull it.
+  - target:
+      kind: DaemonSet
+      name: network-sniffer-collector
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target:
+      kind: Deployment
+      name: network-sniffer-processor
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      # Recycle collector connections fast so the rebalance check fits the
+      # test's time budget.
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: -max-connection-age=20s
+  # No Istio in kind; ignore cluster plumbing so only test edges matter.
+  - target:
+      kind: ConfigMap
+      name: network-sniffer
+    patch: |-
+      - op: replace
+        path: /data/config.yaml
+        value: |
+          ignore:
+            - "kube-system/*"
+            - "local-path-storage/*"
+          istio:
+            enabled: false

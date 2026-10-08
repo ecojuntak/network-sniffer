@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+// Wire contract between the node-local collector (DaemonSet) and the central
+// processor (Deployment). Collector and processor roll independently, so this
+// schema must only evolve additively: never renumber or reuse a field.
+package sniffer.v1;
+
+option go_package = "github.com/ecojuntak/network-sniffer/api/sniffer/v1;snifferv1";
+
+// ProcessorService receives connection records captured by collectors and
+// runs them through the enrichment / dedup / emit pipeline.
+service ProcessorService {
+  // Report delivers one batch of pre-aggregated flow records from a node. The
+  // call is idempotent per batch only in the sense that replays produce
+  // duplicate edges suppressed by dedup; collectors retry on failure.
+  rpc Report(ReportRequest) returns (ReportResponse);
+}
+
+message ReportRequest {
+  // Name of the node the collector runs on (downward API).
+  string node_name = 1;
+  repeated FlowRecord records = 2;
+}
+
+message ReportResponse {}
+
+// FlowRecord is a canonical (caller -> callee) connection observation,
+// aggregated on the node over a short window. The caller's ephemeral port is
+// dropped so connection churn collapses into one record with a count.
+message FlowRecord {
+  // 4 or 16 byte addresses.
+  bytes src_ip = 1;
+  bytes dst_ip = 2;
+  // Callee listening port.
+  uint32 dst_port = 3;
+  // IANA protocol number (6 = TCP).
+  uint32 protocol = 4;
+  // True when captured on the connecting side, false on the accepting side.
+  bool outbound = 5;
+  // Pod UID of the connecting process, resolved on the node from its cgroup.
+  // Empty when unknown (accepted side, host process, or exited process).
+  string src_pod_uid = 6;
+  // Command name of the connecting process; empty on the accepted side.
+  string comm = 7;
+  // Number of connections folded into this record.
+  uint32 count = 8;
+  int64 first_seen_unix_nano = 9;
+  int64 last_seen_unix_nano = 10;
+}
