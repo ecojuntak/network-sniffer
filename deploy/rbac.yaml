@@ -1,13 +1,14 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: network-sniffer
+  name: network-sniffer-processor
   namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: network-sniffer
+# Only the processor holds the workload cache; the collector needs no API access.
 rules:
   # Read-only cluster-wide watch to map pod IPs to their owning workload.
   - apiGroups: [""]
@@ -54,5 +55,5 @@ roleRef:
   name: network-sniffer
 subjects:
   - kind: ServiceAccount
-    name: network-sniffer
+    name: network-sniffer-processor
     namespace: default

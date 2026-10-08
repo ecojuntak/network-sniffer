@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: network-sniffer-processor
+  namespace: default
+  labels:
+    app.kubernetes.io/name: network-sniffer
+    app.kubernetes.io/component: processor
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: network-sniffer
+      app.kubernetes.io/component: processor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: network-sniffer
+        app.kubernetes.io/component: processor
+      annotations:
+        # Collectors run on the host network, outside the mesh, and speak
+        # plaintext gRPC; a STRICT-mTLS sidecar would reject them.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: network-sniffer-processor
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: network-sniffer
+                    app.kubernetes.io/component: processor
+      containers:
+        - name: processor
+          image: ecojuntak/network-sniffer:v1.6.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - "processor"
+            - "-config"
+            - "/etc/network-sniffer/config.yaml"
+          env:
+            # Soft heap ceiling for the Go GC, below the 1Gi limit, so the GC
+            # works harder before the kernel OOM-kills the pod. Each replica
+            # holds the full (trimmed) cluster-wide informer cache.
+            - name: GOMEMLIMIT
+              value: "850MiB"
+          ports:
+            - name: grpc
+              containerPort: 9000
+            - name: metrics
+              containerPort: 9090
+          # Ready only once the informer cache has synced, so collectors are
+          # never routed to a replica that would mis-attribute workloads.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/network-sniffer
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: network-sniffer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: network-sniffer-processor
+  namespace: default
+  labels:
+    app.kubernetes.io/name: network-sniffer
+    app.kubernetes.io/component: processor
+spec:
+  # Plain ClusterIP: the processor recycles gRPC connections (MaxConnectionAge)
+  # so kube-proxy rebalances collectors across replicas.
+  selector:
+    app.kubernetes.io/name: network-sniffer
+    app.kubernetes.io/component: processor
+  ports:
+    - name: grpc
+      port: 9000
+      targetPort: grpc
+      appProtocol: grpc
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: network-sniffer-processor
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: network-sniffer
+      app.kubernetes.io/component: processor

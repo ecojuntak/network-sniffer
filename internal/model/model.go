@@ -87,6 +87,9 @@ type ConnectionEvent struct {
 	// tcp_connect fentry recorded the socket). False means an accepted /
 	// inbound socket — the server-side half of the two-sided capture.
 	Outbound bool
+	// SrcPodUID is the pod UID of the connecting process, resolved on the node
+	// from its cgroup (see resolver.PodUIDForPID). Empty when unknown.
+	SrcPodUID string
 }
 
 // IsLoopback reports whether either endpoint is a loopback address
