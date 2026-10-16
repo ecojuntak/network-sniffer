@@ -37,6 +37,12 @@ const dedupWindow = 30 * time.Second
 // sweepInterval bounds dedup memory by evicting expired edges periodically.
 const sweepInterval = time.Minute
 
+// kafkaCheckTimeout bounds the startup connectivity check of the Kafka sink.
+const kafkaCheckTimeout = 30 * time.Second
+
+// kafkaFlushTimeout bounds flushing buffered Kafka records on shutdown.
+const kafkaFlushTimeout = 10 * time.Second
+
 // maxConnectionAgeGrace lets in-flight Report calls finish on a connection
 // being recycled by -max-connection-age.
 const maxConnectionAgeGrace = 30 * time.Second
@@ -116,8 +122,12 @@ func runProcessor(ctx context.Context, logger *slog.Logger, args []string) error
 	}
 
 	m := processor.NewMetrics(reg)
+	out, kafka, err := buildSinks(ctx, logger, conf.Emit, m)
+	if err != nil {
+		return err
+	}
 	deduper := dedup.New(dedupWindow)
-	pipeline := processor.NewPipeline(ctrl.Cache(), matcher, deduper, emit.New(os.Stdout), m)
+	pipeline := processor.NewPipeline(ctrl.Cache(), matcher, deduper, out, m)
 
 	lis, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
@@ -134,6 +144,14 @@ func runProcessor(ctx context.Context, logger *slog.Logger, args []string) error
 		<-ctx.Done()
 		ready.Store(false)
 		srv.GracefulStop()
+		// No more Handle calls after GracefulStop: flush what is buffered.
+		if kafka != nil {
+			fctx, cancel := context.WithTimeout(context.Background(), kafkaFlushTimeout)
+			defer cancel()
+			if err := kafka.Close(fctx); err != nil {
+				logger.Error("kafka flush incomplete", slog.Any("err", err))
+			}
+		}
 		return nil
 	})
 	g.Go(func() error {
@@ -144,6 +162,43 @@ func runProcessor(ctx context.Context, logger *slog.Logger, args []string) error
 	ready.Store(true)
 	logger.Info("processor started", slog.String("listen", *listenAddr))
 	return g.Wait()
+}
+
+// buildSinks creates the configured output sinks. The Kafka sink, when
+// enabled, is checked against the brokers so misconfiguration fails startup;
+// it is returned separately so the caller can flush it on shutdown.
+func buildSinks(ctx context.Context, logger *slog.Logger, ec config.EmitConfig, m *processor.Metrics) (emit.Sink, *emit.Kafka, error) {
+	var sinks []emit.Sink
+	if ec.StdoutEnabled() {
+		sinks = append(sinks, emit.New(os.Stdout))
+		logger.Info("emit sink enabled", slog.String("sink", "stdout"))
+	}
+	var kafka *emit.Kafka
+	if ec.Kafka.Enabled {
+		var lastLog atomic.Int64
+		k, err := emit.NewKafka(ec.Kafka, func(reason string, err error) {
+			m.EmitErrors.WithLabelValues("kafka", reason).Inc()
+			// At most one log line per second; the counter has the volume.
+			now := time.Now().Unix()
+			if prev := lastLog.Load(); now > prev && lastLog.CompareAndSwap(prev, now) {
+				logger.Error("kafka emit failed", slog.String("reason", reason), slog.Any("err", err))
+			}
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		cctx, cancel := context.WithTimeout(ctx, kafkaCheckTimeout)
+		defer cancel()
+		if err := k.Check(cctx); err != nil {
+			k.Close(cctx)
+			return nil, nil, err
+		}
+		kafka = k
+		sinks = append(sinks, k)
+		logger.Info("emit sink enabled", slog.String("sink", "kafka"),
+			slog.Any("brokers", ec.Kafka.Brokers), slog.String("topic", ec.Kafka.Topic))
+	}
+	return emit.Multi(sinks...), kafka, nil
 }
 
 // syncDone returns a channel closed once the resolver's informers synced.

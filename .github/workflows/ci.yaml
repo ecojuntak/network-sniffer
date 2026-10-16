@@ -33,8 +33,21 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out
 
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Resolve dependencies
+        run: go mod tidy
+      # Starts a Redpanda container via testcontainers on the runner's Docker.
+      - name: Integration tests
+        run: make test-integration
+
   release:
-    needs: test
+    needs: [test, integration]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -62,7 +75,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
-    needs: [test, release]
+    needs: [test, integration, release]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

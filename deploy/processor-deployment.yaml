@@ -47,6 +47,13 @@ spec:
             # holds the full (trimmed) cluster-wide informer cache.
             - name: GOMEMLIMIT
               value: "850MiB"
+            # Kafka SASL password (emit.kafka.sasl); the Secret is optional.
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: network-sniffer-kafka
+                  key: password
+                  optional: true
           ports:
             - name: grpc
               containerPort: 9000

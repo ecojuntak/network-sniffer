@@ -27,6 +27,14 @@ all: test build
 test:
 	$(GO) test -race -cover ./internal/...
 
+## test-integration: run integration tests (Kafka sink against a Redpanda
+## container). Needs a Docker-compatible runtime; with podman on macOS set
+##   DOCKER_HOST=unix://$$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')
+##   TESTCONTAINERS_RYUK_DISABLED=true
+.PHONY: test-integration
+test-integration:
+	$(GO) test -race -tags integration -run Integration -count=1 -timeout 20m ./internal/...
+
 ## cover: write and show an HTML coverage report.
 .PHONY: cover
 cover:

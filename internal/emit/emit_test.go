@@ -133,3 +133,54 @@ func TestLogOneLinePerCall(t *testing.T) {
 		t.Fatalf("got %d log lines, want 2:\n%s", len(lines), buf.String())
 	}
 }
+
+// Encode must produce the exact object the stdout sink logs, so Kafka and log
+// consumers share one contract.
+func TestEncodeMatchesLogLine(t *testing.T) {
+	sc := model.ServiceCall{
+		Source:       model.Workload{Name: "frontend", Namespace: "shop", Kind: "Deployment"},
+		Dest:         model.Workload{Name: "checkout", Namespace: "shop", Kind: "Deployment"},
+		DestPort:     8080,
+		DestProtocol: model.ProtocolTCP,
+	}
+	var buf bytes.Buffer
+	New(&buf).Emit(sc)
+
+	var logged, encoded map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &logged); err != nil {
+		t.Fatal(err)
+	}
+	enc := Encode(sc)
+	if bytes.HasSuffix(enc, []byte("\n")) {
+		t.Errorf("Encode output has trailing newline")
+	}
+	if err := json.Unmarshal(enc, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	delete(logged, "time")
+	delete(encoded, "time")
+	if len(logged) != len(encoded) {
+		t.Fatalf("logged %v, encoded %v", logged, encoded)
+	}
+	for k, v := range logged {
+		if encoded[k] != v {
+			t.Errorf("field %q: encoded %v, logged %v", k, encoded[k], v)
+		}
+	}
+}
+
+type recordSink struct{ got []model.ServiceCall }
+
+func (r *recordSink) Emit(sc model.ServiceCall) { r.got = append(r.got, sc) }
+
+func TestMultiFansOut(t *testing.T) {
+	a, b := &recordSink{}, &recordSink{}
+	sc := model.ServiceCall{Source: model.Workload{Name: "a"}}
+	Multi(a, b).Emit(sc)
+	if len(a.got) != 1 || len(b.got) != 1 {
+		t.Fatalf("a=%d b=%d, want 1 each", len(a.got), len(b.got))
+	}
+	if s := Multi(a); s != Sink(a) {
+		t.Fatal("Multi(single) should return the sink unchanged")
+	}
+}

@@ -27,7 +27,7 @@ Each observed connection is logged as one JSON line with:
 node: sniffer collector (DaemonSet)                 sniffer processor (Deployment, N replicas)
 sock:inet_sock_set_state                            gRPC ProcessorService.Report
   ──▶ ring buffer ──▶ decode ──▶ canonical            ──▶ enrich ──▶ reversed-dup / ignore
-  ──▶ filter (loopback, link-local, ...)              ──▶ dedup ──▶ emit (JSON log)
+  ──▶ filter (loopback, link-local, ...)              ──▶ dedup ──▶ emit (stdout / Kafka)
   ──▶ pid → pod UID (/proc cgroup)                        │
   ──▶ dst IP → hostname (DNS cache)                       │
   ──▶ aggregate (1s) ──▶ batch ──── gRPC ───────▶     resolver cache (IP/UID → workload)
@@ -56,7 +56,43 @@ cgroup_skb ingress (UDP sport 53)                         ▲
 5. `internal/dedup` collapses repeated identical edges within a time window.
    Each processor replica dedups independently, so an edge may be logged once
    per replica per window.
-6. `internal/emit` writes the `ServiceCall` as a structured JSON log line.
+6. `internal/emit` writes the `ServiceCall` as a structured JSON record to
+   each enabled sink: a log line on stdout and/or a record on a Kafka topic
+   (see [Output](#output)).
+
+## Output
+
+Sinks are selected by the `emit` section of the config file. Without it, edges
+go to stdout only.
+
+```yaml
+emit:
+  stdout:
+    enabled: true            # default true
+  kafka:
+    enabled: true
+    brokers: ["kafka-0.kafka:9092", "kafka-1.kafka:9092"]
+    topic: network-sniffer.service-calls   # must already exist
+    clientID: network-sniffer-processor    # optional
+    tls:
+      enabled: false
+      caFile: ""                           # optional PEM bundle
+      insecureSkipVerify: false
+    sasl:
+      mechanism: SCRAM-SHA-512             # "", PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+      username: sniffer
+      password: ""                         # or env KAFKA_SASL_PASSWORD
+```
+
+- Each Kafka record's value is the same JSON object as the stdout log line;
+  its key is `<source_namespace>/<source_workload>`.
+- `KAFKA_SASL_PASSWORD` overrides `sasl.password`, so the password can come
+  from a Secret (see `deploy/processor-deployment.yaml`).
+- At startup the processor checks the brokers, credentials and topic and exits
+  on failure. At runtime, produce never blocks the pipeline: when the producer
+  buffer (10k records) is full, edges are dropped and counted in
+  `sniffer_processor_emit_errors_total{sink="kafka",reason="buffer_full"}`;
+  broker rejections count as `reason="produce"`.
 
 ### External destination names
 
@@ -94,7 +130,7 @@ processor is ready only after its informer cache has synced.
 | `internal/resolver`     | all\*    | IP→workload cache + owner-chain walk           |
 | `internal/enrich`       | all      | Event + resolver → `ServiceCall`               |
 | `internal/dedup`        | all      | Time-windowed edge de-duplication              |
-| `internal/emit`         | all      | `ServiceCall` → JSON log                       |
+| `internal/emit`         | all      | `ServiceCall` → JSON log / Kafka sinks         |
 | `internal/collector`    | all      | Node-local aggregate + batch + gRPC send       |
 | `internal/dnscache`     | all      | Node-local IP → hostname cache from DNS        |
 | `internal/processor`    | all      | gRPC server + enrich/dedup/emit pipeline       |
@@ -119,6 +155,7 @@ only in the linux build path.
 make test     # go test -race -cover ./internal/...  (works on any OS)
 make cover    # coverage report
 make vet
+make test-integration  # Kafka sink against a Redpanda container (needs Docker/podman)
 make proto    # regenerate api/sniffer/v1 after editing the .proto (needs buf)
 ```
 

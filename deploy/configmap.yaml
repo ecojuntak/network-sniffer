@@ -5,6 +5,23 @@ metadata:
   namespace: default
 data:
   config.yaml: |
+    # Output sinks for emitted edges. Without this section, edges go to stdout
+    # only. The Kafka topic must already exist; the SASL password is read
+    # from the KAFKA_SASL_PASSWORD env var (Secret network-sniffer-kafka, see
+    # processor-deployment.yaml) when set.
+    emit:
+      stdout:
+        enabled: true
+      kafka:
+        enabled: false
+        # brokers: ["kafka-0.kafka:9092"]
+        # topic: network-sniffer.service-calls
+        # tls:
+        #   enabled: true
+        # sasl:
+        #   mechanism: SCRAM-SHA-512   # PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+        #   username: network-sniffer
+
     # Istio ServiceEntry resolution: maps ServiceEntry VIPs (including istiod's
     # auto-allocated 240.240.0.0/16 addresses) to their external host name, so
     # external dependencies (e.g. RDS via a ServiceEntry) show a name instead

@@ -107,3 +107,137 @@ func TestLoadEmptyFile(t *testing.T) {
 		t.Fatalf("Ignore = %v, want empty", cfg.Ignore)
 	}
 }
+
+// Without an emit section, edges go to stdout only, as before.
+func TestLoadEmitDefaults(t *testing.T) {
+	p := writeConfig(t, "ignore: []\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Emit.StdoutEnabled() {
+		t.Fatal("StdoutEnabled = false, want true by default")
+	}
+	if cfg.Emit.Kafka.Enabled {
+		t.Fatal("Kafka.Enabled = true, want false by default")
+	}
+	if !(Config{}).Emit.StdoutEnabled() {
+		t.Fatal("zero Config: StdoutEnabled = false, want true")
+	}
+}
+
+func TestLoadEmitKafka(t *testing.T) {
+	p := writeConfig(t, `
+emit:
+  stdout:
+    enabled: false
+  kafka:
+    enabled: true
+    brokers: ["kafka-0:9092", "kafka-1:9092"]
+    topic: edges
+    tls:
+      enabled: true
+    sasl:
+      mechanism: SCRAM-SHA-512
+      username: sniffer
+      password: from-file
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Emit.StdoutEnabled() {
+		t.Fatal("StdoutEnabled = true, want false")
+	}
+	k := cfg.Emit.Kafka
+	if !k.Enabled || len(k.Brokers) != 2 || k.Topic != "edges" || !k.TLS.Enabled {
+		t.Fatalf("Kafka = %+v", k)
+	}
+	if k.SASL.Mechanism != SASLMechanismScramSHA512 || k.SASL.Username != "sniffer" || k.SASL.Password != "from-file" {
+		t.Fatalf("SASL = %+v", k.SASL)
+	}
+}
+
+// The password env var overrides the file, so it can live in a Secret.
+func TestLoadEmitKafkaPasswordFromEnv(t *testing.T) {
+	t.Setenv(KafkaPasswordEnv, "from-env")
+	p := writeConfig(t, `
+emit:
+  kafka:
+    enabled: true
+    brokers: ["kafka:9092"]
+    topic: edges
+    sasl:
+      mechanism: PLAIN
+      username: sniffer
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Emit.Kafka.SASL.Password; got != "from-env" {
+		t.Fatalf("Password = %q, want from-env", got)
+	}
+}
+
+func TestLoadEmitInvalid(t *testing.T) {
+	tests := map[string]string{
+		"no sink": `
+emit:
+  stdout:
+    enabled: false
+`,
+		"no brokers": `
+emit:
+  kafka:
+    enabled: true
+    topic: edges
+`,
+		"no topic": `
+emit:
+  kafka:
+    enabled: true
+    brokers: ["kafka:9092"]
+`,
+		"bad mechanism": `
+emit:
+  kafka:
+    enabled: true
+    brokers: ["kafka:9092"]
+    topic: edges
+    sasl:
+      mechanism: GSSAPI
+      username: u
+      password: p
+`,
+		"missing password": `
+emit:
+  kafka:
+    enabled: true
+    brokers: ["kafka:9092"]
+    topic: edges
+    sasl:
+      mechanism: PLAIN
+      username: u
+`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, body)); err == nil {
+				t.Fatal("Load = nil error, want error")
+			}
+		})
+	}
+}
+
+// A disabled Kafka section is not validated.
+func TestLoadEmitKafkaDisabledNotValidated(t *testing.T) {
+	p := writeConfig(t, `
+emit:
+  kafka:
+    enabled: false
+`)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}

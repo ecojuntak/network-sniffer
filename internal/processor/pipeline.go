@@ -29,13 +29,13 @@ type Pipeline struct {
 	cache   Cache
 	matcher *ignore.Matcher
 	deduper *dedup.Deduper
-	out     *emit.Logger
+	out     emit.Sink
 	m       *Metrics
 	now     func() time.Time
 }
 
 // NewPipeline wires the pipeline stages.
-func NewPipeline(cache Cache, matcher *ignore.Matcher, deduper *dedup.Deduper, out *emit.Logger, m *Metrics) *Pipeline {
+func NewPipeline(cache Cache, matcher *ignore.Matcher, deduper *dedup.Deduper, out emit.Sink, m *Metrics) *Pipeline {
 	return &Pipeline{cache: cache, matcher: matcher, deduper: deduper, out: out, m: m, now: time.Now}
 }
 
@@ -62,5 +62,5 @@ func (p *Pipeline) Handle(ev model.ConnectionEvent) {
 		return
 	}
 	p.m.Records.WithLabelValues(resultEmitted).Inc()
-	p.out.Log(sc)
+	p.out.Emit(sc)
 }
