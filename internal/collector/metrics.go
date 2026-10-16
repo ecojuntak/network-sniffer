@@ -9,6 +9,9 @@ type Metrics struct {
 	RecordsDropped prometheus.Counter
 	ReportErrors   prometheus.Counter
 	QueueDepth     prometheus.Gauge
+	// DNSAnswers counts DNS records and address answers by result.
+	DNSAnswers      *prometheus.CounterVec
+	DNSCacheEntries prometheus.Gauge
 }
 
 // Event results counted by Metrics.Events.
@@ -17,6 +20,14 @@ const (
 	resultFiltered    = "filtered"
 	resultDecodeError = "decode_error"
 	resultReadError   = "read_error"
+)
+
+// DNS results counted by Metrics.DNSAnswers. cached and cache_full count
+// address answers; the others count whole DNS records.
+const (
+	resultCached    = "cached"
+	resultCacheFull = "cache_full"
+	resultNotAnswer = "not_answer"
 )
 
 // NewMetrics creates the collector metrics and registers them with reg.
@@ -42,7 +53,15 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "sniffer_collector_queue_batches",
 			Help: "Batches waiting to be sent to the processor.",
 		}),
+		DNSAnswers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sniffer_collector_dns_answers_total",
+			Help: "DNS records and address answers read from the eBPF ring buffer, by result.",
+		}, []string{"result"}),
+		DNSCacheEntries: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "sniffer_collector_dns_cache_entries",
+			Help: "IP -> hostname entries held in the DNS cache.",
+		}),
 	}
-	reg.MustRegister(m.Events, m.RecordsSent, m.RecordsDropped, m.ReportErrors, m.QueueDepth)
+	reg.MustRegister(m.Events, m.RecordsSent, m.RecordsDropped, m.ReportErrors, m.QueueDepth, m.DNSAnswers, m.DNSCacheEntries)
 	return m
 }

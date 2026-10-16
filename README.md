@@ -29,9 +29,10 @@ sock:inet_sock_set_state                            gRPC ProcessorService.Report
   ──▶ ring buffer ──▶ decode ──▶ canonical            ──▶ enrich ──▶ reversed-dup / ignore
   ──▶ filter (loopback, link-local, ...)              ──▶ dedup ──▶ emit (JSON log)
   ──▶ pid → pod UID (/proc cgroup)                        │
+  ──▶ dst IP → hostname (DNS cache)                       │
   ──▶ aggregate (1s) ──▶ batch ──── gRPC ───────▶     resolver cache (IP/UID → workload)
-                                                          ▲
-                                                      k8s informers
+cgroup_skb ingress (UDP sport 53)                         ▲
+  ──▶ dns ring buffer ──▶ parse A/AAAA ──▶ DNS cache  k8s informers
 ```
 
 1. An eBPF program (`bpf/sniffer.c`) attaches to the ABI-stable
@@ -39,7 +40,8 @@ sock:inet_sock_set_state                            gRPC ProcessorService.Report
    TCP connection reaching `ESTABLISHED` (IPv4 and IPv6).
 2. The **collector** (`internal/collector`) decodes each record, orients it
    caller → callee, drops node-local noise, resolves the connecting process's
-   pod UID from its cgroup (only possible on the node), folds repeated
+   pod UID from its cgroup (only possible on the node), looks up the
+   destination's hostname in the node's DNS cache (see below), folds repeated
    connections into flow records and ships them in batches over gRPC
    (`api/sniffer/v1`). It holds no Kubernetes state, so its memory does not
    grow with the cluster.
@@ -49,10 +51,36 @@ sock:inet_sock_set_state                            gRPC ProcessorService.Report
    …) by walking the owner chain. Unknown IPs become `external` peers named by
    their address.
 4. `internal/enrich` joins each record with the cache into a `ServiceCall`.
+   A destination with no cluster identity is named by the hostname the
+   collector attached (e.g. `api.stripe.com`), falling back to its IP.
 5. `internal/dedup` collapses repeated identical edges within a time window.
    Each processor replica dedups independently, so an edge may be logged once
    per replica per window.
 6. `internal/emit` writes the `ServiceCall` as a structured JSON log line.
+
+### External destination names
+
+A second eBPF program (`cgroup_skb/ingress` on the cgroup v2 root) copies every
+UDP packet from source port 53 delivered to any socket on the node, in any pod.
+The collector parses the A/AAAA answers (`internal/decode/dns.go`) and keeps an
+`IP → hostname` map (`internal/dnscache`). Each entry lives for the record's TTL,
+clamped to [1m, 30m]. A CNAME chain is attributed to the name the application
+queried. Outbound flows to a cached IP carry the name as `dst_hostname`, and the
+processor uses it only when the IP has no cluster identity, so pods, Services,
+ServiceEntries and nodes keep their names. All IPs of one host collapse into one
+edge.
+
+The feature needs `CAP_NET_ADMIN` and a cgroup v2 hierarchy mounted at
+`-cgroup-path` (default `/sys/fs/cgroup`). Without them the collector logs a
+warning and reports external destinations by IP. Disable it with
+`-dns-names=false`. Limitations:
+
+- DNS over TCP, DoT and DoH are not seen.
+- Lookups made before the collector started are not known until the name is
+  resolved again.
+- `/etc/hosts` entries are not seen.
+- One IP serving several names (CDNs, shared load balancers) gets the name
+  resolved most recently on that node.
 
 Both modes expose Prometheus metrics, `/healthz` and `/readyz` on `:9090`. The
 processor is ready only after its informer cache has synced.
@@ -68,6 +96,7 @@ processor is ready only after its informer cache has synced.
 | `internal/dedup`        | all      | Time-windowed edge de-duplication              |
 | `internal/emit`         | all      | `ServiceCall` → JSON log                       |
 | `internal/collector`    | all      | Node-local aggregate + batch + gRPC send       |
+| `internal/dnscache`     | all      | Node-local IP → hostname cache from DNS        |
 | `internal/processor`    | all      | gRPC server + enrich/dedup/emit pipeline       |
 | `internal/telemetry`    | all      | Metrics and health endpoints                   |
 | `api/sniffer/v1`        | all      | Collector ↔ processor protobuf / gRPC API      |

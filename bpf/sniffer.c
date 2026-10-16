@@ -26,6 +26,15 @@
 //
 // The emitted record layout MUST stay byte-for-byte in sync with the Go decoder
 // in internal/decode/decode.go (59 bytes, packed).
+//
+// A second, independent program (handle_dns_ingress) attaches as cgroup_skb
+// ingress to the root cgroup v2 and copies the payload of every UDP packet
+// from source port 53 delivered to a local socket — in any pod's network
+// namespace, since cgroup programs follow the receiving socket's cgroup, not
+// the netns — into the dns_events ring buffer. Userspace parses the DNS answer
+// and caches IP -> hostname so external destinations get a name instead of a
+// bare address. It only observes: it always returns 1 (pass). Its record
+// layout MUST stay in sync with internal/decode/dns.go (2 + 512 bytes, packed).
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -37,6 +46,13 @@
 #define AF_INET6 10
 #define TCP_ESTABLISHED 1
 #define TCP_CLOSE 7
+#define IPPROTO_UDP_NUM 17
+#define DNS_PORT 53
+// DNS_MAX_PAYLOAD caps the copied DNS message. Classic UDP DNS is <= 512
+// bytes; larger (EDNS0) answers are truncated and parsed best-effort.
+#define DNS_MAX_PAYLOAD 512
+// DNS_HEADER_LEN is the fixed DNS header; shorter payloads cannot be DNS.
+#define DNS_HEADER_LEN 12
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -185,4 +201,91 @@ int handle_set_state(struct trace_event_raw_inet_sock_set_state *ctx)
 
 	bpf_ringbuf_submit(e, 0);
 	return 0;
+}
+
+// dns_event carries one raw DNS message to userspace. len is the number of
+// valid payload bytes (host byte order); the rest of payload is unspecified.
+struct dns_event {
+	__u16 len;
+	__u8 payload[DNS_MAX_PAYLOAD];
+} __attribute__((packed));
+
+// Ring buffer carrying DNS messages to userspace (128 KiB), separate from
+// events so a burst of DNS traffic never crowds out connection records.
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 128 * 1024);
+} dns_events SEC(".maps");
+
+// Force BTF emission of the DNS event type for userspace/bpf2go.
+struct dns_event *unused_dns_event __attribute__((unused));
+
+// handle_dns_ingress copies DNS responses (UDP from source port 53) delivered
+// to any socket under the attached cgroup. In cgroup_skb programs skb data
+// starts at the network header. IPv6 extension headers are not walked: DNS
+// responses do not carry them in practice. It always passes the packet.
+SEC("cgroup_skb/ingress")
+int handle_dns_ingress(struct __sk_buff *skb)
+{
+	__u8 vihl;
+	if (bpf_skb_load_bytes(skb, 0, &vihl, 1) < 0)
+		return 1;
+
+	__u32 l4off;
+	__u8 proto;
+	if ((vihl >> 4) == 4) {
+		l4off = (__u32)(vihl & 0x0f) * 4;
+		if (l4off < 20)
+			return 1;
+		if (bpf_skb_load_bytes(skb, 9, &proto, 1) < 0)
+			return 1;
+	} else if ((vihl >> 4) == 6) {
+		l4off = 40;
+		if (bpf_skb_load_bytes(skb, 6, &proto, 1) < 0)
+			return 1;
+	} else {
+		return 1;
+	}
+	if (proto != IPPROTO_UDP_NUM)
+		return 1;
+
+	__be16 sport;
+	if (bpf_skb_load_bytes(skb, l4off, &sport, sizeof(sport)) < 0)
+		return 1;
+	if (sport != bpf_htons(DNS_PORT))
+		return 1;
+
+	__u32 off = l4off + 8; // UDP header
+	if (skb->len <= off)
+		return 1;
+	__u32 len = skb->len - off;
+	if (len > DNS_MAX_PAYLOAD)
+		len = DNS_MAX_PAYLOAD;
+	if (len < DNS_HEADER_LEN)
+		return 1;
+
+	struct dns_event *e = bpf_ringbuf_reserve(&dns_events, sizeof(*e), 0);
+	if (!e)
+		return 1;
+
+	// Re-derive the bound right before the helper call so the verifier sees
+	// 0 < n <= sizeof(payload) on the register passed as the size. The mask
+	// is a no-op on the value (len is already <= 512) but gives the verifier
+	// an unsigned [0, 1023] range that the compare narrows. It is inline asm
+	// on a 64-bit value because clang otherwise folds the mask and the
+	// compare away (it knows len's range) and checks a zero-extended copy,
+	// leaving the size register unbounded: "R4 min value is negative".
+	__u64 n = len;
+	asm volatile("%[n] &= 0x3ff" : [n] "+r"(n));
+	if (n == 0 || n > DNS_MAX_PAYLOAD) {
+		bpf_ringbuf_discard(e, 0);
+		return 1;
+	}
+	if (bpf_skb_load_bytes(skb, off, e->payload, n) < 0) {
+		bpf_ringbuf_discard(e, 0);
+		return 1;
+	}
+	e->len = (__u16)n;
+	bpf_ringbuf_submit(e, 0);
+	return 1;
 }

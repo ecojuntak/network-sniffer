@@ -27,6 +27,7 @@ type flowKey struct {
 
 type flow struct {
 	comm        string
+	hostname    string
 	count       uint32
 	first, last time.Time
 }
@@ -66,6 +67,9 @@ func (a *Aggregator) Add(ev model.ConnectionEvent, now time.Time) int {
 	if f.comm == "" {
 		f.comm = ev.Comm
 	}
+	if f.hostname == "" {
+		f.hostname = ev.DstHostname
+	}
 	f.count++
 	f.last = now
 	return len(a.flows)
@@ -91,6 +95,7 @@ func (a *Aggregator) Drain() []*snifferv1.FlowRecord {
 			Count:             f.count,
 			FirstSeenUnixNano: f.first.UnixNano(),
 			LastSeenUnixNano:  f.last.UnixNano(),
+			DstHostname:       f.hostname,
 		})
 	}
 	return out

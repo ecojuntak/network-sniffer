@@ -46,4 +46,8 @@ message FlowRecord {
   uint32 count = 8;
   int64 first_seen_unix_nano = 9;
   int64 last_seen_unix_nano = 10;
+  // DNS name dst_ip was resolved from, taken from a DNS answer observed on
+  // the node. Set only on outbound records; empty when no answer was seen.
+  // The processor uses it to name destinations with no cluster identity.
+  string dst_hostname = 11;
 }

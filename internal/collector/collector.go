@@ -8,6 +8,7 @@ import (
 
 	"github.com/ecojuntak/network-sniffer/internal/bpf"
 	"github.com/ecojuntak/network-sniffer/internal/decode"
+	"github.com/ecojuntak/network-sniffer/internal/dnscache"
 	"github.com/ecojuntak/network-sniffer/internal/resolver"
 )
 
@@ -22,6 +23,12 @@ type Source interface {
 	Read() ([]byte, error)
 }
 
+// DNSSource yields raw DNS records captured by the probe. bpf.Loader
+// satisfies it; ReadDNS must return bpf.ErrClosed once the source is closed.
+type DNSSource interface {
+	ReadDNS() ([]byte, error)
+}
+
 // Config tunes the collector.
 type Config struct {
 	// ProcRoot is the host procfs mount used for PID -> pod UID resolution.
@@ -31,10 +38,14 @@ type Config struct {
 	// MaxBatch caps the records per Report call; reaching it in the
 	// aggregator also triggers an early flush.
 	MaxBatch int
+	// DNS caches IP -> hostname from observed DNS answers and names the
+	// destination of outbound connections. Nil disables hostname lookup.
+	DNS *dnscache.Cache
 }
 
 // Collector runs the node-local pipeline: read -> decode -> canonical ->
-// filter -> pod UID -> aggregate -> batch.
+// filter -> pod UID -> dst hostname -> aggregate -> batch. RunDNS feeds the
+// hostname cache from a separate DNS record stream.
 type Collector struct {
 	cfg    Config
 	agg    *Aggregator
@@ -101,13 +112,62 @@ func (c *Collector) handle(raw []byte, now time.Time) {
 	// The connecting process's pod is only discoverable here, from its
 	// cgroup in the host procfs. The processor uses it to attribute
 	// host-network sources that share the node IP.
+	//
+	// The destination's hostname comes from a DNS answer seen on this node
+	// before the connect. Only outbound records are looked up: an accepted
+	// record's peer is a remote caller this node never resolved.
 	if ev.Outbound {
 		ev.SrcPodUID = c.podUID(ev.PID, now)
+		if c.cfg.DNS != nil {
+			ev.DstHostname, _ = c.cfg.DNS.Lookup(ev.DstIP, now)
+		}
 	}
 
 	c.m.Events.WithLabelValues(resultAccepted).Inc()
 	if c.agg.Add(ev, now) >= c.cfg.MaxBatch {
 		c.flush()
+	}
+}
+
+// RunDNS reads DNS records from src into the hostname cache until it is
+// closed. It is a no-op returning nil when DNS is disabled.
+func (c *Collector) RunDNS(ctx context.Context, src DNSSource) error {
+	if c.cfg.DNS == nil {
+		return nil
+	}
+	for {
+		raw, err := src.ReadDNS()
+		if errors.Is(err, bpf.ErrClosed) {
+			return ctx.Err()
+		}
+		if err != nil {
+			c.m.DNSAnswers.WithLabelValues(resultReadError).Inc()
+			c.log.Warn("read dns record", slog.Any("err", err))
+			continue
+		}
+		c.handleDNS(raw, time.Now())
+	}
+}
+
+// handleDNS caches the address answers of one raw DNS record.
+func (c *Collector) handleDNS(raw []byte, now time.Time) {
+	answers, err := decode.DecodeDNS(raw)
+	if errors.Is(err, decode.ErrNotDNSAnswer) {
+		// Queries, NXDOMAIN and other non-answers are normal traffic.
+		c.m.DNSAnswers.WithLabelValues(resultNotAnswer).Inc()
+		return
+	}
+	if err != nil {
+		c.m.DNSAnswers.WithLabelValues(resultDecodeError).Inc()
+		c.log.Debug("decode dns record", slog.Any("err", err))
+		return
+	}
+	for _, a := range answers {
+		if c.cfg.DNS.Put(a.IP, a.Name, time.Duration(a.TTL)*time.Second, now) {
+			c.m.DNSAnswers.WithLabelValues(resultCached).Inc()
+		} else {
+			c.m.DNSAnswers.WithLabelValues(resultCacheFull).Inc()
+		}
 	}
 }
 
@@ -138,6 +198,9 @@ func (c *Collector) flushLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			c.flush()
+			if c.cfg.DNS != nil {
+				c.m.DNSCacheEntries.Set(float64(c.cfg.DNS.Sweep(time.Now())))
+			}
 		}
 	}
 }

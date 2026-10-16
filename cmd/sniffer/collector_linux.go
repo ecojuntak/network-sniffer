@@ -17,6 +17,7 @@ import (
 	snifferv1 "github.com/ecojuntak/network-sniffer/api/sniffer/v1"
 	"github.com/ecojuntak/network-sniffer/internal/bpf"
 	"github.com/ecojuntak/network-sniffer/internal/collector"
+	"github.com/ecojuntak/network-sniffer/internal/dnscache"
 	"github.com/ecojuntak/network-sniffer/internal/telemetry"
 )
 
@@ -34,11 +35,14 @@ func runCollector(ctx context.Context, logger *slog.Logger, args []string) error
 	maxBatch := fs.Int("max-batch", 1000, "maximum records per Report call")
 	queueSize := fs.Int("queue-size", 100, "batches buffered while the processor is unreachable")
 	reportTimeout := fs.Duration("report-timeout", 5*time.Second, "timeout of one Report call")
+	dnsNames := fs.Bool("dns-names", true, "name external destinations from DNS answers observed on the node")
+	cgroupPath := fs.String("cgroup-path", "/sys/fs/cgroup", "cgroup v2 root the DNS capture program attaches to")
+	dnsCacheSize := fs.Int("dns-cache-size", 65536, "maximum IP -> hostname entries held")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *maxBatch <= 0 || *queueSize <= 0 || *flushInterval <= 0 {
-		return errors.New("max-batch, queue-size and flush-interval must be positive")
+	if *maxBatch <= 0 || *queueSize <= 0 || *flushInterval <= 0 || *dnsCacheSize <= 0 {
+		return errors.New("max-batch, queue-size, flush-interval and dns-cache-size must be positive")
 	}
 	logger = logger.With(slog.String("node", *nodeName))
 
@@ -53,17 +57,31 @@ func runCollector(ctx context.Context, logger *slog.Logger, args []string) error
 	reg := telemetry.NewRegistry()
 	m := collector.NewMetrics(reg)
 	sender := collector.NewSender(snifferv1.NewProcessorServiceClient(conn), *nodeName, *queueSize, *reportTimeout, logger, m)
-	coll := collector.New(collector.Config{
-		ProcRoot:      procRoot,
-		FlushInterval: *flushInterval,
-		MaxBatch:      *maxBatch,
-	}, sender, logger, m)
 
 	loader, err := bpf.New()
 	if err != nil {
 		return err
 	}
 	defer loader.Close()
+
+	// DNS naming is best-effort: without CAP_NET_ADMIN or a cgroup v2
+	// hierarchy the collector still captures connections, and external
+	// destinations are reported by IP as before.
+	var dns *dnscache.Cache
+	if *dnsNames {
+		if err := loader.AttachDNS(*cgroupPath); err != nil {
+			logger.Warn("dns capture disabled; external destinations are reported by IP", slog.Any("err", err))
+		} else {
+			dns = dnscache.New(*dnsCacheSize)
+		}
+	}
+
+	coll := collector.New(collector.Config{
+		ProcRoot:      procRoot,
+		FlushInterval: *flushInterval,
+		MaxBatch:      *maxBatch,
+		DNS:           dns,
+	}, sender, logger, m)
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return telemetry.Serve(ctx, *metricsAddr, reg, nil) })
@@ -74,7 +92,8 @@ func runCollector(ctx context.Context, logger *slog.Logger, args []string) error
 		return loader.Close()
 	})
 	g.Go(func() error { return coll.Run(ctx, loader) })
+	g.Go(func() error { return coll.RunDNS(ctx, loader) })
 
-	logger.Info("collector started", slog.String("processor", *processorAddr))
+	logger.Info("collector started", slog.String("processor", *processorAddr), slog.Bool("dns_names", dns != nil))
 	return g.Wait()
 }

@@ -90,6 +90,20 @@ type ConnectionEvent struct {
 	// SrcPodUID is the pod UID of the connecting process, resolved on the node
 	// from its cgroup (see resolver.PodUIDForPID). Empty when unknown.
 	SrcPodUID string
+	// DstHostname is the DNS name the destination IP was resolved from, as
+	// observed in a DNS answer on the caller's node. Set only on outbound
+	// events; empty when no answer for the IP was seen. Used to name external
+	// destinations instead of reporting a bare IP.
+	DstHostname string
+}
+
+// DNSAnswer is one address record of a DNS response observed on the node:
+// IP was returned for the queried Name and is valid for TTL seconds. For a
+// CNAME chain Name is the originally queried name, not the canonical target.
+type DNSAnswer struct {
+	Name string
+	IP   netip.Addr
+	TTL  uint32
 }
 
 // IsLoopback reports whether either endpoint is a loopback address

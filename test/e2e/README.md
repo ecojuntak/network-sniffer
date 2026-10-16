@@ -37,6 +37,7 @@ machine, against its kernel's BTF.
 | A2 | no reversed phantom edge `echo -> caller` |
 | A3 | every collector sent records and dropped none |
 | A4 | processors report emitted records |
+| A5 | edge `e2e/caller -> example.com` named from DNS, collectors cached DNS answers (skipped without egress) |
 | failover | after deleting a processor pod, delivery continues, nothing dropped, replacement emits the edge |
 | rebalance | after scaling to 3 replicas, every replica receives batches (`-max-connection-age=20s`) |
 

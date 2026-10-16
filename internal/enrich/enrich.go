@@ -19,7 +19,11 @@ import (
 // recover the exact owning pod. The UID path never overrides a concrete pod-IP
 // match, guarding against a stale UID displacing good data. A nil uids store
 // disables the UID path.
-// Destinations are remote, so they are always IP-resolved.
+// Destinations are remote, so they are always IP-resolved. A destination with
+// no cluster identity is named by ev.DstHostname — the DNS name the caller's
+// node saw it resolved from — instead of its bare IP when one is known. Any
+// cluster identity (pod workload, Service, ServiceEntry, Node) wins over the
+// hostname.
 //
 // The destination's application-layer protocol is resolved from the Kubernetes
 // Service / EndpointSlice port metadata via ports; a nil ports store, or a
@@ -36,9 +40,13 @@ func Enrich(ev model.ConnectionEvent, store resolver.Store, uids resolver.UIDSto
 	if ports != nil {
 		l7, _ = ports.LookupPort(ev.DstIP, ev.DstPort)
 	}
+	dest := resolver.WorkloadForIP(store, ev.DstIP)
+	if dest.IsExternal() && ev.DstHostname != "" {
+		dest.Name = ev.DstHostname
+	}
 	return model.ServiceCall{
 		Source:          source,
-		Dest:            resolver.WorkloadForIP(store, ev.DstIP),
+		Dest:            dest,
 		DestPort:        ev.DstPort,
 		DestProtocol:    ev.Protocol,
 		DestAppProtocol: l7,

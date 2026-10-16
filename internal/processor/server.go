@@ -52,12 +52,13 @@ func toEvent(r *snifferv1.FlowRecord) (model.ConnectionEvent, bool) {
 		return model.ConnectionEvent{}, false
 	}
 	return model.ConnectionEvent{
-		SrcIP:     src.Unmap(),
-		DstIP:     dst.Unmap(),
-		DstPort:   uint16(r.GetDstPort()),
-		Protocol:  model.Protocol(r.GetProtocol()),
-		Comm:      r.GetComm(),
-		Outbound:  r.GetOutbound(),
-		SrcPodUID: r.GetSrcPodUid(),
+		SrcIP:       src.Unmap(),
+		DstIP:       dst.Unmap(),
+		DstPort:     uint16(r.GetDstPort()),
+		Protocol:    model.Protocol(r.GetProtocol()),
+		Comm:        r.GetComm(),
+		Outbound:    r.GetOutbound(),
+		SrcPodUID:   r.GetSrcPodUid(),
+		DstHostname: r.GetDstHostname(),
 	}, true
 }

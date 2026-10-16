@@ -88,6 +88,14 @@ has_edge() {
 			and .dest_port == 8080 and .dest_app_protocol == "http")' >/dev/null
 }
 
+# has_external_edge: caller's call to example.com is named by its DNS name
+# instead of its IP.
+has_external_edge() {
+	processor_logs | jq -e -s '
+		any(.[]; .source_workload == "caller" and .source_namespace == "e2e"
+			and .dest_workload == "example.com" and .dest_namespace == "")' >/dev/null
+}
+
 has_reversed_edge() {
 	processor_logs | jq -e -s '
 		any(.[]; .source_workload == "echo" and .dest_workload == "caller")' >/dev/null
@@ -195,6 +203,14 @@ pass "A3 no collector dropped records"
 [[ $(sum_pods "$PROCESSOR_SEL" sniffer_processor_records_total 'result="emitted"') -gt 0 ]] ||
 	fail "A4 processor emitted metric is zero"
 pass "A4 processors report emitted records"
+if k exec -n e2e deploy/caller -- wget -q -T 5 -O /dev/null http://example.com/ >/dev/null 2>&1; then
+	wait_for "A5 external edge caller -> example.com named by DNS" 60 has_external_edge
+	[[ $(sum_pods "$COLLECTOR_SEL" sniffer_collector_dns_answers_total 'result="cached"') -gt 0 ]] ||
+		fail "A5 collectors cached no DNS answers"
+	pass "A5 collectors cache DNS answers"
+else
+	log "SKIP A5: no egress to example.com from the cluster"
+fi
 
 # --- 7. failover ------------------------------------------------------------
 log "failover: deleting one processor pod"

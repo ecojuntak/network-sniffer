@@ -143,6 +143,23 @@ func TestReportKeepsExternalCaller(t *testing.T) {
 	}
 }
 
+func TestReportNamesExternalDestinationByHostname(t *testing.T) {
+	f := newFixture(t)
+	r1 := record(frontendIP, netip.MustParseAddr("93.184.216.34"), 443, true, "")
+	r2 := record(frontendIP, netip.MustParseAddr("93.184.216.35"), 443, true, "")
+	r1.DstHostname, r2.DstHostname = "api.example.com", "api.example.com"
+	// Same host behind two IPs collapses into one edge; an internal
+	// destination keeps its workload name.
+	r3 := record(frontendIP, checkoutIP, 8080, true, "")
+	r3.DstHostname = "checkout.shop.svc.cluster.local"
+	report(t, f, r1, r2, r3)
+
+	got := edges(t, f.out)
+	if len(got) != 2 || got[0] != "frontend -> api.example.com:443" || got[1] != "frontend -> checkout:8080" {
+		t.Fatalf("edges = %v", got)
+	}
+}
+
 func TestReportIgnoresAndDedups(t *testing.T) {
 	f := newFixture(t, "monitoring/*")
 	report(t, f,

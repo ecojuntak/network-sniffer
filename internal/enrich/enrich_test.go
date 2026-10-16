@@ -186,3 +186,35 @@ func TestEnrichBothUnknown(t *testing.T) {
 		t.Fatalf("expected both external, got src=%+v dst=%+v", sc.Source, sc.Dest)
 	}
 }
+
+// An external destination is named by the hostname its IP was resolved from.
+func TestEnrichHostnameNamesExternalDestination(t *testing.T) {
+	ev := model.ConnectionEvent{
+		SrcIP:       netip.MustParseAddr("10.0.0.1"),
+		DstIP:       netip.MustParseAddr("34.117.59.81"),
+		DstPort:     443,
+		DstHostname: "api.example.com",
+	}
+	sc := Enrich(ev, resolver.NewCache(), nil, nil)
+	if !sc.Dest.IsExternal() || sc.Dest.Name != "api.example.com" || sc.Dest.Namespace != "" {
+		t.Errorf("dest = %+v, want external api.example.com", sc.Dest)
+	}
+}
+
+// Any cluster identity of the destination wins over the hostname.
+func TestEnrichHostnameNeverOverridesClusterIdentity(t *testing.T) {
+	dst := netip.MustParseAddr("10.0.0.2")
+	for _, w := range []model.Workload{
+		{Name: "checkout", Namespace: "shop", Kind: "Deployment"},
+		{Name: "checkout", Namespace: "shop", Kind: model.KindService},
+		{Name: "db.example.rds.amazonaws.com", Namespace: "shop", Kind: model.KindServiceEntry},
+		{Name: "ip-10-0-0-2", Kind: model.KindNode},
+	} {
+		c := resolver.NewCache()
+		c.Upsert(dst, w)
+		ev := model.ConnectionEvent{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: dst, DstHostname: "something.example.com"}
+		if got := Enrich(ev, c, nil, nil).Dest; got != w {
+			t.Errorf("%s: dest = %+v, want %+v", w.Kind, got, w)
+		}
+	}
+}

@@ -69,4 +69,10 @@ spec:
           command:
             - sh
             - -c
-            - while true; do wget -q -O /dev/null http://echo.e2e.svc:8080/ || true; sleep 2; done
+            # example.com exercises DNS naming of external destinations
+            # (check A5); it fails harmlessly when the VM has no egress.
+            - >-
+              while true; do
+              wget -q -O /dev/null http://echo.e2e.svc:8080/ || true;
+              wget -q -T 5 -O /dev/null http://example.com/ || true;
+              sleep 2; done

@@ -137,8 +137,12 @@ type FlowRecord struct {
 	Count             uint32 `protobuf:"varint,8,opt,name=count,proto3" json:"count,omitempty"`
 	FirstSeenUnixNano int64  `protobuf:"varint,9,opt,name=first_seen_unix_nano,json=firstSeenUnixNano,proto3" json:"first_seen_unix_nano,omitempty"`
 	LastSeenUnixNano  int64  `protobuf:"varint,10,opt,name=last_seen_unix_nano,json=lastSeenUnixNano,proto3" json:"last_seen_unix_nano,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// DNS name dst_ip was resolved from, taken from a DNS answer observed on
+	// the node. Set only on outbound records; empty when no answer was seen.
+	// The processor uses it to name destinations with no cluster identity.
+	DstHostname   string `protobuf:"bytes,11,opt,name=dst_hostname,json=dstHostname,proto3" json:"dst_hostname,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FlowRecord) Reset() {
@@ -241,6 +245,13 @@ func (x *FlowRecord) GetLastSeenUnixNano() int64 {
 	return 0
 }
 
+func (x *FlowRecord) GetDstHostname() string {
+	if x != nil {
+		return x.DstHostname
+	}
+	return ""
+}
+
 var File_sniffer_v1_processor_proto protoreflect.FileDescriptor
 
 const file_sniffer_v1_processor_proto_rawDesc = "" +
@@ -250,7 +261,7 @@ const file_sniffer_v1_processor_proto_rawDesc = "" +
 	"\rReportRequest\x12\x1b\n" +
 	"\tnode_name\x18\x01 \x01(\tR\bnodeName\x120\n" +
 	"\arecords\x18\x02 \x03(\v2\x16.sniffer.v1.FlowRecordR\arecords\"\x10\n" +
-	"\x0eReportResponse\"\xb7\x02\n" +
+	"\x0eReportResponse\"\xda\x02\n" +
 	"\n" +
 	"FlowRecord\x12\x15\n" +
 	"\x06src_ip\x18\x01 \x01(\fR\x05srcIp\x12\x15\n" +
@@ -263,7 +274,8 @@ const file_sniffer_v1_processor_proto_rawDesc = "" +
 	"\x05count\x18\b \x01(\rR\x05count\x12/\n" +
 	"\x14first_seen_unix_nano\x18\t \x01(\x03R\x11firstSeenUnixNano\x12-\n" +
 	"\x13last_seen_unix_nano\x18\n" +
-	" \x01(\x03R\x10lastSeenUnixNano2S\n" +
+	" \x01(\x03R\x10lastSeenUnixNano\x12!\n" +
+	"\fdst_hostname\x18\v \x01(\tR\vdstHostname2S\n" +
 	"\x10ProcessorService\x12?\n" +
 	"\x06Report\x12\x19.sniffer.v1.ReportRequest\x1a\x1a.sniffer.v1.ReportResponseB?Z=github.com/ecojuntak/network-sniffer/api/sniffer/v1;snifferv1b\x06proto3"
 
