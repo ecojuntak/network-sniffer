@@ -40,8 +40,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      # The processor tests import the collector, which needs the generated
+      # eBPF bindings on linux.
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm curl linux-tools-generic
+          BPFTOOL="$(ls /usr/lib/linux-tools-*/bpftool | head -1)"
+          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
       - name: Resolve dependencies
         run: go mod tidy
+      - name: Generate eBPF bindings
+        run: make generate BPFTOOL="$BPFTOOL"
       # Starts a Redpanda container via testcontainers on the runner's Docker.
       - name: Integration tests
         run: make test-integration
